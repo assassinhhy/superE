@@ -22,25 +22,6 @@ const change = computed(() => {
   return (close - open) / open;
 });
 
-const book = computed(() => {
-  const depth = state.depth;
-  if (!depth?.bids_px?.length) return { asks: [], bids: [], max: 1 };
-  const asks = depth.asks_px.map((px, index) => ({
-    px,
-    qty: depth.asks_qty?.[index] ?? "",
-  }));
-  const bids = depth.bids_px.map((px, index) => ({
-    px,
-    qty: depth.bids_qty?.[index] ?? "",
-  }));
-  const max = Math.max(
-    1,
-    ...asks.map((row) => Number(row.qty) || 0),
-    ...bids.map((row) => Number(row.qty) || 0),
-  );
-  return { asks: asks.slice(0, 20).reverse(), bids: bids.slice(0, 20), max };
-});
-
 const kinds = {
   volume: "放量",
   price_jump: "跳价",
@@ -55,11 +36,6 @@ function role(id) {
   return "未接入";
 }
 
-function width(qty) {
-  const value = Number(qty);
-  if (!value) return "0%";
-  return `${Math.min(100, (value / book.value.max) * 100)}%`;
-}
 </script>
 
 <template>
@@ -74,24 +50,6 @@ function width(qty) {
         · 成交额 {{ state.ticker?.quote_volume || "—" }}
       </p>
       <p v-else class="muted">现货只录 1 分钟，用来对照基差。24h 行情是合约的。</p>
-    </section>
-
-    <section>
-      <h2>盘口 20 档</h2>
-      <p v-if="!book.asks.length" class="muted">还没有盘口。</p>
-      <div v-else class="book">
-        <div v-for="(row, index) in book.asks" :key="'a' + index" class="level ask">
-          <i :style="{ width: width(row.qty) }"></i>
-          <span>{{ row.px }}</span>
-          <span>{{ row.qty || "—" }}</span>
-        </div>
-        <div class="spread"></div>
-        <div v-for="(row, index) in book.bids" :key="'b' + index" class="level bid">
-          <i :style="{ width: width(row.qty) }"></i>
-          <span>{{ row.px }}</span>
-          <span>{{ row.qty || "—" }}</span>
-        </div>
-      </div>
     </section>
 
     <section>
