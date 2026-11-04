@@ -119,15 +119,14 @@ def load_bars(
     interval: str,
     limit_bars: int | None = None,
 ) -> Bars:
-    sql = """
-        SELECT open_time, o, h, l, c, volume, quote_volume, trades, taker_buy_base
-        FROM klines
-        WHERE market = ? AND symbol = ? AND interval = ?
-        ORDER BY open_time
-    """
-    rows = conn.execute(sql, (market, symbol, interval)).fetchall()
+    cols_sql = "SELECT open_time, o, h, l, c, volume, quote_volume, trades, taker_buy_base FROM klines"
     if limit_bars is not None:
-        rows = rows[-(limit_bars + WARMUP_BARS) :]
+        # Newest rows only, so a short window does not read the whole history.
+        sql = cols_sql + " WHERE market = ? AND symbol = ? AND interval = ? ORDER BY open_time DESC LIMIT ?"
+        rows = conn.execute(sql, (market, symbol, interval, limit_bars + WARMUP_BARS)).fetchall()[::-1]
+    else:
+        sql = cols_sql + " WHERE market = ? AND symbol = ? AND interval = ? ORDER BY open_time"
+        rows = conn.execute(sql, (market, symbol, interval)).fetchall()
     if not rows:
         raise ValueError(f"库里没有 {market} {symbol} {interval} 的 K 线")
 

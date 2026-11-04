@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from supere.timeutil import UTC8
-from supere.train import backtest, data, features, labels, metrics, model, splits
+from supere.train import artifacts, backtest, data, features, labels, metrics, model, splits
 from supere.train.config import TrainConfig
 from supere.train.model import CLASSES
 
@@ -31,10 +31,11 @@ WINDOW_LOOKBACK = 60  # bars of history a row needs; no gap may fall inside it
 MIN_EFFECTIVE_SAMPLES = 300  # plan 7.6: promotion threshold, reported here only
 
 
-def make_logger(log_dir: Path, *, console: bool = True) -> tuple[logging.Logger, Path]:
+def make_logger(log_dir: Path, *, console: bool = True, tag: str | None = None) -> tuple[logging.Logger, Path]:
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC8).strftime("%Y%m%d-%H%M%S")
-    path = log_dir / f"train-{stamp}.log"
+    suffix = f"-{tag}" if tag else ""
+    path = log_dir / f"train-{stamp}{suffix}.log"
 
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
@@ -77,7 +78,8 @@ def close_logger(log: logging.Logger) -> None:
         handler.close()
 
 
-def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
+def run(cfg: TrainConfig, db_path: Path, log: logging.Logger, *, save_root: Path | None = None) -> dict:
+    """Train and evaluate. With ``save_root``, also refit on all samples and save the model there."""
     log.info("开始离线训练 周期=%s 标签 H=%d k=%.2f 切分=%s",
              cfg.interval, cfg.label.horizon, cfg.label.k_atr, cfg.split.mode)
     log.info("只读打开 %s", Path(db_path).resolve())
@@ -225,7 +227,17 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
         "importance": importance,
         "features": names,
     }
+    if save_root is not None:
+        result["artifact"] = _save_final_model(cfg, X, y, names, result, save_root, log)
     return result
+
+
+def _save_final_model(cfg, X, y, names, result, save_root: Path, log: logging.Logger) -> dict:
+    final = model.fit_all(X, y, cfg.model)
+    trained_at = datetime.now(UTC8).isoformat(timespec="seconds")
+    folder = artifacts.save(save_root, cfg, result, final.booster_, names, trained_at)
+    log.info("已保存调试模型：%s（全量 %d 个样本重拟合）", folder, X.shape[0])
+    return {"dir": str(folder), "model_id": f"{cfg.interval}-{result['feature_hash']}-{result['dataset_hash']}"}
 
 
 def _backtest_block(cfg, bars, funding, sample_bar, exit_bar, entry, exit_px, upper, lower, amb, proba, ret1, log):
@@ -284,14 +296,7 @@ def _fmt(ms) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M")
 
 
-def _strict(obj):
-    if isinstance(obj, dict):
-        return {k: _strict(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_strict(v) for v in obj]
-    if isinstance(obj, (float, np.floating)):
-        return float(obj) if np.isfinite(obj) else None
-    return obj
+_strict = artifacts.strict
 
 
 def write_result(result: dict, log_path: Path) -> Path:

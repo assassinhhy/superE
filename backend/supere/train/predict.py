@@ -1,0 +1,339 @@
+"""Latest-bar prediction from a saved debug model. Read-only, never trades.
+
+No-leak rules:
+
+* Only bars whose close is at or before ``now`` are used. A forming bar, or any
+  bar the collector has not closed yet, is cut off before features are built.
+* Features come from ``features.build``, the same code as training. Row ``last``
+  reads bars ``0..last`` only, so the prediction is for the entry at the next
+  bar's open.
+* Funding and metrics are read as of the decision moment, with the same delays
+  as in training.
+
+``PredictService`` keeps the artifacts and the auxiliary tables in memory for a
+short time. It never writes to the database.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+
+from supere.intervals import INTERVAL_MS
+from supere.timeutil import UTC8
+from supere.train import artifacts, data, features
+from supere.train.artifacts import DEBUG_NOTE, Artifact, ArtifactError
+from supere.train.config import PRODUCT_INTERVALS, TRAINABLE_INTERVALS
+from supere.train.runner import WINDOW_LOOKBACK
+
+log = logging.getLogger("supere.train.predict")
+
+AUX_TTL_SECONDS = 60.0  # funding and metrics re-read at most this often
+DEFAULT_BAR_LIMIT = 1500  # newest bars loaded per call; EMA warm-up needs ~300
+
+
+EXPLAIN_TOP = 3  # features shown per prediction
+CLASS_ORDER = ("down", "flat", "up")  # booster column order: classes 0, 1, 2
+
+
+@dataclass
+class Latest:
+    """Decision row and its probabilities, before any JSON shaping."""
+
+    last: int
+    decision_ms: int
+    probs: dict[str, float]  # keys: down, flat, up
+    core_ok: bool
+    explain_for: str  # the class with the highest probability
+    top_features: list[dict]  # [{name, contribution, value}], largest |contribution| first
+    atr: float  # ATR(atr_period) at the decision bar, same as the label barrier width
+    ref_close: float  # close of the decision bar; the entry reference
+
+
+def closed_count(close_time: np.ndarray, now_ms: int) -> int:
+    """Number of bars whose close is at or before ``now_ms``. Close times are sorted."""
+    return int(np.searchsorted(close_time, now_ms, side="right"))
+
+
+def direction(probs: dict[str, float], threshold: float) -> str:
+    """Same rule as ``backtest.signal_dirs``: a side needs ``p >= threshold`` and beats the other side."""
+    up, dn = probs["up"], probs["down"]
+    if up >= threshold and up > dn:
+        return "up"
+    if dn >= threshold and dn > up:
+        return "down"
+    return "flat"
+
+
+def latest_probs(art: Artifact, bars: data.Bars, funding: data.Funding, metrics_in: data.Metrics | None,
+                 now_ms: int) -> Latest | str:
+    """Probabilities for the newest closed bar, or a short reason string when there are none."""
+    n_closed = closed_count(bars.close_time, now_ms)
+    if n_closed == 0:
+        return "no_bars"
+    closed = bars.slice_to(n_closed)
+    last = n_closed - 1
+
+    # A gap inside the lookback means the rolling features would mix bars that are not adjacent.
+    gaps = data.gap_after(closed)
+    lo = max(last - WINDOW_LOOKBACK, 0)
+    if np.any(gaps[lo:last]):
+        return "gap"
+
+    names, X = features.build(
+        closed,
+        funding if art.meta["use_funding"] else None,
+        metrics_in if art.meta["use_metrics"] else None,
+    )
+    if names != art.names:
+        raise ArtifactError(f"{art.interval} 的特征列表和当前代码不一致，需要重新训练")
+
+    row = X[last]
+    atr_now = float(features.atr(closed, int(art.meta["atr_period"]))[last])
+    core_idx = [names.index(c) for c in features.CORE_FEATURES]
+    if not np.all(np.isfinite(row[core_idx])):
+        return "no_features"
+
+    raw = art.booster.predict(row.reshape(1, -1))
+    raw = np.asarray(raw, dtype=np.float64).reshape(-1)
+    if raw.shape[0] != 3 or not np.all(np.isfinite(raw)):
+        raise ArtifactError(f"{art.interval} 的模型输出不是三类概率")
+    probs = {"down": float(raw[0]), "flat": float(raw[1]), "up": float(raw[2])}
+    explain_for = max(CLASS_ORDER, key=lambda k: probs[k])
+    top = explain_row(art.booster, names, row, CLASS_ORDER.index(explain_for))
+    return Latest(last=last, decision_ms=int(bars.close_time[last]), probs=probs, core_ok=True,
+                  explain_for=explain_for, top_features=top, atr=atr_now,
+                  ref_close=float(closed.c[last]))
+
+
+LEVEL_RULE = ("入场参考 = 决策 K 线收盘价（训练标签用的是下一根开盘，实盘会有开盘跳空偏差）；"
+              "止损 = 入场 ∓ k×ATR14；止盈1 = 入场 ± k×ATR14（与训练标签的上下障碍相同，回测口径）；"
+              "止盈2 = 入场 ± 2k×ATR14（未回测，仅参考）。价格点位与杠杆无关。")
+
+
+def trade_levels(direction_: str, ref: float, atr: float, k_atr: float) -> tuple[dict | None, str | None]:
+    """Entry, stop and two targets as prices, from the same barrier rule as the labels.
+
+    Returns ``(levels, None)`` for a long or short, and ``(None, reason)`` for flat or
+    when the ATR is not usable. Stop and target 1 are the lower and upper barriers the
+    labels and the backtest use, so the backtest checks these exact levels.
+    """
+    if direction_ not in ("up", "down"):
+        return None, "观望：没有方向概率过阈值，不给点位"
+    if not (np.isfinite(ref) and ref > 0 and np.isfinite(atr) and atr > 0):
+        return None, "ATR 或参考价不可用，不给点位"
+    sign = 1.0 if direction_ == "up" else -1.0
+    width = k_atr * atr
+    entry = ref
+    stop = entry - sign * width
+    t1 = entry + sign * width
+    t2 = entry + sign * 2.0 * width
+    levels = {
+        "side": "long" if sign > 0 else "short",
+        "ref_price": _num(ref),
+        "entry": _num(entry),
+        "stop": _num(stop),
+        "targets": [_num(t1), _num(t2)],
+        "k_atr": float(k_atr),
+        "atr": _num(atr),
+        "stop_pct": _num(stop / entry - 1.0),
+        "target_pct": [_num(t1 / entry - 1.0), _num(t2 / entry - 1.0)],
+        "backtested_targets": [True, False],
+        "rule": LEVEL_RULE,
+    }
+    return levels, None
+
+
+def explain_row(booster, names: list[str], row: np.ndarray, class_index: int,
+                top: int = EXPLAIN_TOP) -> list[dict]:
+    """Per-feature SHAP contributions (LightGBM ``pred_contrib``) for one class of one row.
+
+    The contribution is on the booster's raw score for that class, not on the
+    probability: positive pushes the class up, negative pushes it down. Per class the
+    booster returns ``n_features + 1`` values, the last being the bias, and the
+    segments sum to the raw score (checked in the tests).
+    """
+    n = len(names)
+    flat = np.asarray(booster.predict(row.reshape(1, -1), pred_contrib=True), dtype=np.float64).reshape(-1)
+    if flat.shape[0] != len(CLASS_ORDER) * (n + 1):
+        raise ArtifactError("模型的 pred_contrib 输出形状和特征数对不上")
+    seg = flat[class_index * (n + 1): class_index * (n + 1) + n]
+    order = np.argsort(-np.abs(seg), kind="stable")[:top]
+    return [
+        {"name": names[i], "contribution": round(float(seg[i]), 6), "value": _num(row[i])}
+        for i in order
+    ]
+
+
+def _num(x) -> float | None:
+    x = float(x)
+    return x if np.isfinite(x) else None
+
+
+def _base(interval: str) -> dict:
+    return {"interval": interval, "debug": True, "debug_note": DEBUG_NOTE}
+
+
+def _fmt(ms: int) -> str:
+    return datetime.fromtimestamp(int(ms) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M")
+
+
+CONTEXT_WINDOW = 20  # bars for the key high and low shown beside the prediction
+
+
+def _context(bars: data.Bars, funding: data.Funding, last: int, decision_ms: int) -> dict:
+    """Display-only numbers for the explanation text: no model input, no levels.
+
+    Key high and low are over the last ``CONTEXT_WINDOW`` closed bars including the
+    decision bar. The funding rate is the last settlement strictly before the decision.
+    """
+    lo = max(last - CONTEXT_WINDOW + 1, 0)
+    k = int(np.searchsorted(funding.time, decision_ms, side="left")) - 1
+    fund = None
+    if k >= 0:
+        fund = {"rate": _num(funding.rate[k]), "time_utc8": _fmt(int(funding.time[k]))}
+    return {
+        "ref_close": _num(bars.c[last]),
+        "window_bars": int(last - lo + 1),
+        "high": _num(np.max(bars.h[lo:last + 1])),
+        "low": _num(np.min(bars.l[lo:last + 1])),
+        "funding": fund,
+    }
+
+
+class PredictService:
+    def __init__(self, data_root: Path, *, bar_limit: int = DEFAULT_BAR_LIMIT,
+                 clock=time.time) -> None:
+        self.data_root = Path(data_root)
+        self.db_path = self.data_root / "superE.sqlite"
+        self.bar_limit = bar_limit
+        self._clock = clock
+        # Funding and metrics per (symbol, market), each with the time it was read.
+        self._aux: dict[tuple[str, str], tuple[float, data.Funding, data.Metrics]] = {}
+        self._art_cache: dict[str, tuple[float, Artifact]] = {}
+
+    # -- public -----------------------------------------------------------
+
+    def predict(self, interval: str) -> dict:
+        if interval not in TRAINABLE_INTERVALS:
+            return {**_base(interval), "status": "bad_interval", "direction": None,
+                    "message": f"不支持的周期 {interval}"}
+        try:
+            art = self._artifact(interval)
+        except ArtifactError as exc:
+            return {**_base(interval), "status": "bad_model", "direction": None, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            log.exception("读取 %s 的模型出错", interval)
+            return {**_base(interval), "status": "error", "direction": None,
+                    "message": f"{type(exc).__name__}: {exc}"}
+        if art is None:
+            return {**_base(interval), "status": "no_model", "direction": None,
+                    "message": "这个周期还没有训练好的模型"}
+        if not self.db_path.exists():
+            return {**_base(interval), "status": "no_data", "direction": None,
+                    "message": f"找不到数据库 {self.db_path}"}
+
+        now_ms = int(self._clock() * 1000)
+        try:
+            bars, funding, metrics_in = self._load(art)
+            got = latest_probs(art, bars, funding, metrics_in, now_ms)
+        except ArtifactError as exc:
+            return {**_base(interval), "status": "bad_model", "direction": None, "message": str(exc)}
+        except (sqlite3.Error, ValueError) as exc:
+            log.warning("预测 %s 读数据失败：%s", interval, exc)
+            return {**_base(interval), "status": "no_data", "direction": None, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one interval must not fail the whole batch
+            log.exception("预测 %s 出错", interval)
+            return {**_base(interval), "status": "error", "direction": None,
+                    "message": f"{type(exc).__name__}: {exc}"}
+
+        if isinstance(got, str):
+            return {**_base(interval), "status": got, "direction": None,
+                    "message": _REASON[got], "model_id": art.model_id}
+
+        age_bars = (now_ms - got.decision_ms) / INTERVAL_MS[interval]
+        status = "ok" if age_bars <= 2 else "stale"
+        threshold = float(art.meta["threshold"])
+        dir_now = direction(got.probs, threshold) if status == "ok" else None
+        if status != "ok":
+            levels, levels_reason = None, "数据已过期，不给点位"
+        else:
+            levels, levels_reason = trade_levels(dir_now, got.ref_close, got.atr, float(art.meta["k_atr"]))
+        return {
+            **_base(interval),
+            "status": status,
+            "direction": dir_now,
+            "levels": levels,
+            "levels_reason": levels_reason,
+            "probs": {k: round(v, 6) for k, v in got.probs.items()},
+            "explain_for": got.explain_for,
+            "top_features": got.top_features,
+            "context": _context(bars, funding, got.last, got.decision_ms),
+            "threshold": threshold,
+            "asof_utc8": _fmt(got.decision_ms),
+            "bar_open_utc8": _fmt(int(bars.open_time[got.last])),
+            "model_id": art.model_id,
+            "trained_at_utc8": art.meta["trained_at_utc8"],
+            "horizon": art.meta["horizon"],
+            "oos_accuracy": art.meta["oos"]["classification"].get("accuracy"),
+            "message": DEBUG_NOTE if status == "ok" else "数据已过期，采集器可能没在跑",
+        }
+
+    def predict_all(self, intervals: tuple[str, ...] = PRODUCT_INTERVALS) -> dict:
+        return {"debug": True, "debug_note": DEBUG_NOTE,
+                "items": [self.predict(i) for i in intervals]}
+
+    # -- internals ----------------------------------------------------------
+
+    def _artifact(self, interval: str) -> Artifact | None:
+        directory = artifacts.model_dir(self.data_root, interval)
+        if not directory.exists():
+            return None
+        # *.tmp files are mid-save; ignore them so a save never races this stat().
+        stamp = max((p.stat().st_mtime for p in directory.iterdir() if not p.name.endswith(".tmp")),
+                    default=0.0)
+        cached = self._art_cache.get(interval)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        art = artifacts.load(self.data_root, interval)
+        if art is None:
+            return None
+        self._art_cache[interval] = (stamp, art)
+        return art
+
+    def _load(self, art: Artifact) -> tuple[data.Bars, data.Funding, data.Metrics | None]:
+        symbol = art.meta["symbol"]
+        market = art.meta["market"]
+        now = self._clock()
+        key = (symbol, market)
+        cached = self._aux.get(key)
+        if cached is None or now - cached[0] > AUX_TTL_SECONDS:
+            conn = data.open_readonly(self.db_path)
+            try:
+                funding = data.load_funding(conn, symbol)
+                metrics_in = data.load_metrics(conn, symbol)
+            finally:
+                conn.close()
+            cached = (now, funding, metrics_in)
+            self._aux[key] = cached
+        _, funding, metrics_in = cached
+
+        conn = data.open_readonly(self.db_path)
+        try:
+            bars = data.load_bars(conn, market, symbol, art.interval, self.bar_limit)
+        finally:
+            conn.close()
+        return bars, funding, metrics_in
+
+
+_REASON = {
+    "no_bars": "库里还没有这个周期的已收盘 K 线",
+    "gap": "最近的 K 线有缺口，特征不可靠",
+    "no_features": "核心特征还不完整（历史不够长）",
+}

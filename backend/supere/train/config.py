@@ -15,12 +15,19 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # Labelled horizon (bars) and barrier width (x ATR) per interval.
+# 5m/30m/4h were added for the 2026-11-05 debug batch: horizons are guesses
+# (same bar count as 15m/1h, one fewer for 4h), not tuned values.
 DEFAULT_LABEL: dict[str, tuple[int, float]] = {
+    "5m": (4, 1.0),
     "15m": (4, 1.0),
+    "30m": (4, 1.0),
     "1h": (4, 1.0),
+    "4h": (3, 1.0),
     "12h": (3, 1.0),
 }
 TRAINABLE_INTERVALS: tuple[str, ...] = tuple(DEFAULT_LABEL)
+# The five intervals shown in the UI signal table. `train --interval product` runs these.
+PRODUCT_INTERVALS: tuple[str, ...] = ("5m", "15m", "30m", "1h", "4h")
 
 
 class ConfigError(ValueError):
