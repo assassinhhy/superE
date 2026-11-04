@@ -1,0 +1,39 @@
+# 离线训练配置（可提交）。所有键都可省略，省略即用代码里的默认值。
+# 命令行参数优先于本文件。运行：python -m supere.train --help
+# 只读训练，不下单，不读任何密钥。
+
+[train]
+interval = "12h"          # 可选 12h（默认）、1h、15m；1d/1w/1M 不训练方向模型
+# symbol 默认取 config.toml 的 [symbols] um
+threshold = 0.40          # 开仓所需概率（上涨或下跌类）
+# limit_bars = 2000       # 只用最近 N 根（冒烟加速）
+use_funding = true        # 资金费率特征，并在回测中计入资金费
+use_metrics = true        # 5 分钟合约指标特征（NULL 保留为缺失）
+
+# [label] 默认按周期取值：12h 为 horizon=3，1h/15m 为 horizon=4，k_atr 均为 1.0。
+# 要覆盖时取消下面注释；注意它对所有周期生效，切周期时请一并改。
+[label]
+# horizon = 3             # 标签期限（根 K 线）
+# k_atr = 1.0             # 上下障碍 = 入场价 ± k * ATR
+# atr_period = 14
+
+[split]
+mode = "holdout"          # holdout 或 walk_forward
+valid_frac = 0.25         # holdout 时最近 25% 作为样本外测试段
+n_folds = 4               # walk_forward 的测试折数
+# embargo_bars = 3        # 默认等于 horizon
+
+[cost]
+maker_fee = 0.0002        # 挂单 0.02%（对照口径）
+taker_fee = 0.0005        # 吃单 0.05%（默认口径，主人账户实际费率以后台为准）
+slippage_per_side = 0.0
+
+[model]
+n_estimators = 300
+learning_rate = 0.03
+num_leaves = 15
+min_child_samples = 40
+subsample = 0.8
+colsample_bytree = 0.8
+seed = 42
+n_jobs = 2                # 留出 CPU 给同机运行的采集器
