@@ -7,12 +7,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from supere import __version__
 from supere.config import AppConfig
 from supere.ipc.bus import LiveHub
 from supere.storage.dal import DataAccess
 from supere.timeutil import format_utc8
+
+
+class UTF8JSONResponse(JSONResponse):
+    """Starlette only appends ``charset`` for ``text/*``. Windows clients then
+    guess GBK and split the last byte of a CJK character."""
+
+    media_type = "application/json; charset=utf-8"
 
 
 def create_app(cfg: AppConfig, dal: DataAccess, hub: LiveHub, *, connect_ipc: bool = True) -> FastAPI:
@@ -33,7 +41,12 @@ def create_app(cfg: AppConfig, dal: DataAccess, hub: LiveHub, *, connect_ipc: bo
             except asyncio.CancelledError:
                 pass
 
-    app = FastAPI(title="superE", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="superE",
+        version=__version__,
+        lifespan=lifespan,
+        default_response_class=UTF8JSONResponse,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -136,6 +149,14 @@ def create_app(cfg: AppConfig, dal: DataAccess, hub: LiveHub, *, connect_ipc: bo
 
     @app.post("/api/shutdown")
     async def shutdown():
+        # Drop the read-only connection before the ingestor checkpoints, so
+        # the WAL can actually truncate.
+        if dal.duck is not None:
+            dal.duck.close()
+            dal.duck = None
+        if dal.db is not None:
+            dal.db.close()
+            dal.db = None
         await hub.send({"type": "shutdown"})
         server = getattr(app.state, "server", None)
         if server is not None:

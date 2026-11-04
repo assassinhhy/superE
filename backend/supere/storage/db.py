@@ -35,7 +35,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
 
     def close(self) -> None:
-        self.conn.close()
+        conn = getattr(self, "conn", None)
+        if conn is None:
+            return
+        conn.close()
+        self.conn = None
 
     def checkpoint(self) -> None:
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

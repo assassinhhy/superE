@@ -230,17 +230,22 @@ def test_fear_greed_parse():
 
 def test_api_reads_and_reports_utc8(db: Database):
     db.upsert_klines([_bar(1)])
+    db.add_event(1, "info", "ws", "WS_CONNECTED", "market 已连接", None, ts_local=1)
     cfg = AppConfig()
     app = create_app(cfg, DataAccess(db), LiveHub(), connect_ipc=False)
     with TestClient(app) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["api_port"] == 8766
+        assert "charset=utf-8" in health.headers["content-type"]
         body = client.get("/api/klines", params={"limit": 500}).json()
         assert body["timezone"] == "UTC+8"
         assert body["bars"][0]["open_time_utc8"].endswith("08:01:00") or " " in body["bars"][0]["open_time_utc8"]
-        assert client.post("/api/shutdown").json()["ok"] is True
+        events = client.get("/api/events")
+        assert "charset=utf-8" in events.headers["content-type"]
+        assert "已连接" in events.content.decode("utf-8")
         assert client.get("/api/coverage").status_code == 200
+        assert client.post("/api/shutdown").json()["ok"] is True
 
 
 def test_second_instance_lock(tmp_path: Path):
@@ -252,6 +257,93 @@ def test_second_instance_lock(tmp_path: Path):
     first.release()
     second.acquire()
     second.release()
+
+
+async def test_index_klines_use_pair_not_symbol():
+    import httpx
+
+    from supere.binance.rest import BinanceRest, kline_params
+    from supere.ratelimit import WeightLimiter
+
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"path": request.url.path, "params": dict(request.url.params)})
+        return httpx.Response(200, json=[])
+
+    cfg = AppConfig()
+    cfg.proxy.url = ""
+    cfg.endpoints.fapi = "https://fapi.test"
+    cfg.endpoints.spot_rest = "https://api.test"
+    rest = BinanceRest(
+        cfg,
+        WeightLimiter("futures", 2400),
+        WeightLimiter("spot", 6000),
+        WeightLimiter("futures_data", 1000, window_s=300),
+        transport=httpx.MockTransport(handler),
+    )
+    await rest.klines("um_index", "ETHUSDT", "1m", limit=2)
+    await rest.klines("um_mark", "ETHUSDT", "1m", limit=2)
+    await rest.klines("um_premium", "ETHUSDT", "1m", limit=2)
+    await rest.klines("um", "ETHUSDT", "1m", limit=2)
+    await rest.aclose()
+    index, mark, premium, trade = seen
+    assert index["path"].endswith("/fapi/v1/indexPriceKlines")
+    assert index["params"]["pair"] == "ETHUSDT"
+    assert "symbol" not in index["params"]
+    assert mark["path"].endswith("/fapi/v1/markPriceKlines")
+    assert mark["params"]["symbol"] == "ETHUSDT"
+    assert "pair" not in mark["params"]
+    assert premium["path"].endswith("/fapi/v1/premiumIndexKlines")
+    assert premium["params"]["symbol"] == "ETHUSDT"
+    assert "pair" not in premium["params"]
+    assert trade["params"]["symbol"] == "ETHUSDT"
+    capped = kline_params("um_index", "ETHUSDT", "1m", limit=1500)
+    assert capped["limit"] == 1000
+    assert capped["pair"] == "ETHUSDT"
+
+
+def test_shutdown_flushes_staging_and_wal(tmp_path: Path, db: Database):
+    from supere.acceptance import clean_stop_check
+    from supere.ingest.live import finalize_storage
+    from supere.storage.parquet_store import ParquetStore
+
+    store = ParquetStore(tmp_path / "raw")
+    store.append(
+        "depth",
+        "um",
+        "ETHUSDT",
+        "2026-11-04",
+        {
+            "recv_ms": 10,
+            "recv_local_ms": 9,
+            "event_ms": 10,
+            "transact_ms": 10,
+            "update_id": 1,
+            "bids_px": ["1"],
+            "bids_qty": ["1"],
+            "asks_px": ["2"],
+            "asks_qty": ["1"],
+            "source": "ws",
+        },
+    )
+    db.upsert_klines([_bar(1)])
+    finalize_storage(store, db)
+    db.close()
+    assert list((tmp_path / "raw" / "_staging").glob("*.jsonl*")) == []
+    assert list((tmp_path / "raw").rglob("*.parquet"))
+    wal = tmp_path / "superE.sqlite-wal"
+    assert not wal.exists() or wal.stat().st_size == 0
+    check = clean_stop_check(tmp_path)
+    assert check.status == "PASS", check.detail
+
+
+def test_smoke_labels_are_not_repeated():
+    from supere.acceptance import Check
+
+    line = Check("S1", "PASS", "合约时间 HTTP 200").line()
+    assert line == "[PASS] S1 合约时间 HTTP 200"
+    assert "S1 S1" not in line
 
 
 def test_config_defaults_and_secret_mask():

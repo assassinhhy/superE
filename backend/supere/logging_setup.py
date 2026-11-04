@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -77,7 +78,25 @@ class _DailyUtc8Handler(logging.Handler):
         super().close()
 
 
+def configure_stdio() -> None:
+    """Force UTF-8 on stdout and stderr.
+
+    A Windows pipe or console often uses GBK. Chinese log lines then lose the
+    last byte of a character (``已连接`` becomes ``已连�``) when something
+    decodes those bytes again. The log file is already opened as UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def setup_logging(log_dir: Path, level: int = logging.INFO) -> logging.Logger:
+    configure_stdio()
     logger = logging.getLogger("supere")
     logger.setLevel(level)
     logger.propagate = False

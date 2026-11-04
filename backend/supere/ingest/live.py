@@ -47,6 +47,21 @@ from supere.timeutil import UTC8, local_now_ms, utc8_date
 
 log = logging.getLogger("supere.live")
 
+
+def finalize_storage(store, db, coverage=None) -> None:
+    """Turn staged JSONL into Parquet and checkpoint SQLite.
+
+    Called on shutdown before the pid file is removed. A later taskkill is
+    only a fallback; this is what makes ``_staging`` and the WAL go away.
+    """
+    if store is not None:
+        written = store.rotate()
+        store.convert_many(written)
+    if coverage is not None and db is not None:
+        coverage.flush(db)
+    if db is not None:
+        db.checkpoint()
+
 _DATA_KINDS = {"kline", "aggTrade", "depth", "forceOrder", "markPrice", "miniTicker"}
 
 
@@ -172,16 +187,12 @@ class Ingestor:
 
     async def _shutdown(self, pid_path: Path) -> None:
         self.stop.set()
-        if self.store is not None:
-            with contextlib.suppress(Exception):
-                paths = self.store.rotate()
-                self.store.convert_many(paths)
-            with contextlib.suppress(Exception):
-                self.coverage.flush(self.db)
+        try:
             self._flush_agg_state()
+            finalize_storage(self.store, self.db, self.coverage)
+        except Exception:
+            log.exception("关闭时落盘失败")
         if self.db is not None:
-            with contextlib.suppress(Exception):
-                self.db.checkpoint()
             self.db.close()
             self.db = None
         if self.rest is not None:

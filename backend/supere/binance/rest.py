@@ -140,11 +140,8 @@ class BinanceRest:
         end: int | None = None,
         limit: int = KLINE_PAGE,
     ) -> list:
-        params: dict = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-        if start is not None:
-            params["startTime"] = start
-        if end is not None:
-            params["endTime"] = end
+        limit = effective_kline_limit(market, limit)
+        params = kline_params(market, symbol, interval, limit=limit, start=start, end=end)
         weight = kline_request_weight(limit)
         path, venue = _kline_route(self.cfg, market)
         try:
@@ -246,6 +243,44 @@ class BinanceRest:
 
             raise ChecksumError(f"{dest.name} SHA-256 不一致")
         return True
+
+
+def effective_kline_limit(market: str, limit: int) -> int:
+    """Mark, index, and premium klines cap at 1000. Trade klines cap at 1500.
+
+    The official USD-M connector documents index and mark price klines as
+    ``Default 500, max 1000``. Asking for 1500 there returns HTTP 400.
+    """
+    cap = 1000 if market in {"um_mark", "um_index", "um_premium"} else 1500
+    return max(1, min(int(limit), cap))
+
+
+def kline_params(
+    market: str,
+    symbol: str,
+    interval: str,
+    *,
+    limit: int,
+    start: int | None = None,
+    end: int | None = None,
+) -> dict:
+    """Query string for a kline endpoint.
+
+    ``/fapi/v1/indexPriceKlines`` takes ``pair``. Mark price, premium index,
+    trade klines, and spot klines take ``symbol``. Sending ``symbol`` to the
+    index endpoint is the 400 seen on the Windows machine.
+    """
+    limit = effective_kline_limit(market, limit)
+    params: dict = {"interval": interval, "limit": limit}
+    if market == "um_index":
+        params["pair"] = symbol.upper()
+    else:
+        params["symbol"] = symbol.upper()
+    if start is not None:
+        params["startTime"] = start
+    if end is not None:
+        params["endTime"] = end
+    return params
 
 
 def _kline_route(cfg: AppConfig, market: str) -> tuple[str, str]:

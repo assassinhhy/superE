@@ -192,7 +192,33 @@ def evaluate_data_dir(root: Path) -> list[Check]:
     finally:
         duck.close()
         db.close()
+    checks.append(clean_stop_check(root))
     return checks
+
+
+def clean_stop_check(root: Path) -> Check:
+    """After a graceful stop, staged JSONL is gone and the WAL is not left dirty."""
+    root = Path(root)
+    lock = SingleInstance(root / "superE.lock")
+    try:
+        lock.acquire()
+    except SystemExit:
+        return Check("A10", "SKIP", "采集器仍在运行。停止后再检查暂存是否已写入")
+    else:
+        lock.release()
+    leftovers: list[str] = []
+    staging = root / "raw" / "_staging"
+    if staging.exists():
+        leftovers.extend(
+            path.name for path in staging.glob("*.jsonl*") if path.is_file() and path.stat().st_size > 0
+        )
+    for name in ("superE.sqlite-wal", "superE.sqlite-shm"):
+        path = root / name
+        if path.exists() and path.stat().st_size > 0:
+            leftovers.append(name)
+    if leftovers:
+        return Check("A10", "FAIL", "停止后仍有未收尾文件: " + ", ".join(leftovers))
+    return Check("A10", "PASS", "暂存 JSONL 已写入，WAL/SHM 已收干净")
 
 
 def _continuity(db: Database, duck: DuckReader) -> Check:

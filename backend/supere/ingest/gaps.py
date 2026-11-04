@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from supere.intervals import align_open, next_open
+from supere.intervals import align_open, next_open, previous_open
 
 
 def find_missing_ranges(
@@ -13,37 +13,58 @@ def find_missing_ranges(
     start_open: int,
     end_open: int,
 ) -> list[tuple[int, int]]:
-    """Inclusive ranges of missing open times between ``start_open`` and ``end_open``."""
+    """Inclusive ranges of missing open times between ``start_open`` and ``end_open``.
+
+    Holes are measured from the bars actually stored, stepping with
+    ``next_open`` of the previous bar. That keeps a 3-day series on whatever
+    phase Binance used for that bar. A single synthetic grid would mark every
+    candle after the 2023-08 phase change as missing.
+    """
     if end_open < start_open:
         return []
-    expected = align_open(interval, start_open)
-    if expected < start_open:
-        expected = next_open(interval, expected)
+    opens = sorted({int(item) for item in opens_sorted if start_open <= int(item) <= end_open})
     gaps: list[tuple[int, int]] = []
-    iterator = iter(opens_sorted)
-    current = next(iterator, None)
-    gap_start: int | None = None
-    last_missing: int | None = None
-    while expected <= end_open:
-        while current is not None and current < expected:
-            current = next(iterator, None)
-        if current == expected:
-            if gap_start is not None and last_missing is not None:
-                gaps.append((gap_start, last_missing))
-                gap_start = None
-                last_missing = None
-            current = next(iterator, None)
-        else:
-            if gap_start is None:
-                gap_start = expected
-            last_missing = expected
-        nxt = next_open(interval, expected)
-        if nxt <= expected:
-            break
-        expected = nxt
-    if gap_start is not None and last_missing is not None:
-        gaps.append((gap_start, last_missing))
+    if not opens:
+        aligned = align_open(interval, start_open)
+        if aligned < start_open:
+            aligned = next_open(interval, aligned)
+        tail_end = end_open if align_open(interval, end_open) == end_open else align_open(interval, end_open)
+        if tail_end < aligned:
+            return []
+        if tail_end > end_open:
+            tail_end = previous_open(interval, tail_end)
+        if tail_end >= aligned:
+            gaps.append((aligned, tail_end))
+        return gaps
+    if opens[0] > start_open:
+        lead = _bounded_gap(interval, start_open, opens[0])
+        if lead is not None:
+            gaps.append(lead)
+    for left, right in zip(opens, opens[1:]):
+        nxt = next_open(interval, left)
+        if right <= nxt:
+            continue
+        hole_end = previous_open(interval, right)
+        if hole_end >= nxt:
+            gaps.append((nxt, hole_end))
+    if end_open > opens[-1]:
+        nxt = next_open(interval, opens[-1])
+        tail_end = end_open if align_open(interval, end_open) == end_open else align_open(interval, end_open)
+        if tail_end > end_open:
+            tail_end = previous_open(interval, tail_end)
+        if tail_end >= nxt:
+            gaps.append((nxt, tail_end))
     return gaps
+
+
+def _bounded_gap(interval: str, start_open: int, next_present: int) -> tuple[int, int] | None:
+    aligned = align_open(interval, start_open)
+    if aligned < start_open:
+        aligned = next_open(interval, aligned)
+    hole_end = previous_open(interval, next_present)
+    if hole_end >= aligned:
+        return aligned, hole_end
+    return None
 
 
 def id_gaps(ids: Iterable[int]) -> list[tuple[int, int]]:

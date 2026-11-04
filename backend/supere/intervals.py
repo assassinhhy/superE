@@ -70,6 +70,15 @@ def _stamp(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+# 3-day candles are not a fixed modulo of the Unix epoch, and the phase changed.
+# 2020-01 through 2023-06 archives open on UTC days where day_index % 3 == 2
+# (2020-01-02, 2020-01-05, ...). From the 2023-08-16 archive onward the opens are
+# day_index % 3 == 1 (2023-08-16, 2023-12-08, 2024-01-01, 2024-01-04).
+# Requests and "which candle is open now" use the current phase. Stored bars keep
+# the open time Binance sent, so both phases can live in the same table.
+_3D_PHASE = 1
+
+
 def align_open(interval: str, ts_ms: int) -> int:
     """Open time of the candle that contains ``ts_ms`` (UTC boundaries)."""
     if interval == "1M":
@@ -81,7 +90,7 @@ def align_open(interval: str, ts_ms: int) -> int:
         return _stamp(monday)
     if interval == "3d":
         day_index = ts_ms // DAY_MS
-        delta = (day_index - 2) % 3
+        delta = (day_index - _3D_PHASE) % 3
         return (day_index - delta) * DAY_MS
     step = INTERVAL_MS[interval]
     return ts_ms - (ts_ms % step)

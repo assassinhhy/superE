@@ -16,6 +16,7 @@ from supere.binance.parse import (
 from supere.clock import TimeSample, choose_offset
 from supere.errors import ChecksumError
 from supere.intervals import align_open, close_time_of, next_open
+from supere.ingest.gaps import find_missing_ranges
 from supere.ratelimit import WeightLimiter, kline_request_weight
 from supere.timeutil import format_utc8, to_millis
 
@@ -33,10 +34,13 @@ def test_week_month_and_3d_alignment_matches_archive():
     monday = 1_578_268_800_000  # 2020-01-06, from the 1w archive
     assert align_open("1w", monday) == monday
     assert align_open("1w", monday - 1) == monday - 7 * 86_400_000
-    three_day = 1_577_923_200_000  # 2020-01-02, from the 3d archive
-    assert align_open("3d", three_day) == three_day
-    assert align_open("3d", three_day + 86_400_000) == three_day
-    assert align_open("3d", 1_578_182_400_000 - 1) == three_day
+    # Current 3d phase (day index % 3 == 1), checked against 2024-01 archives.
+    jan1 = 1_704_067_200_000  # 2024-01-01
+    jan4 = jan1 + 3 * 86_400_000  # 2024-01-04
+    assert align_open("3d", jan1) == jan1
+    assert align_open("3d", jan1 + 86_400_000) == jan1
+    assert align_open("3d", jan4 - 1) == jan1
+    assert align_open("3d", jan4) == jan4
     assert align_open("1M", 1_577_836_800_000) == 1_577_836_800_000
 
 
@@ -44,6 +48,38 @@ def test_timestamp_units():
     assert to_millis(1_748_736_000_000_000) == 1_748_736_000_000
     assert to_millis(1_748_736_000_000) == 1_748_736_000_000
     assert to_millis(1_700_000_000) == 1_700_000_000_000
+
+
+def _utc_ms(year: int, month: int, day: int) -> int:
+    from datetime import UTC, datetime
+
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp() * 1000)
+
+
+def test_3d_phase_change_is_not_a_multi_year_gap():
+    # Old phase through 2023-06-27, then the post-2023-08 phase through the
+    # latest bar. Coverage must not paint 2023-08-17..2026-10-30 as one hole
+    # just because those dates sit on the retired grid.
+    step = 3 * 86_400_000
+    old_start = _utc_ms(2022, 9, 27)
+    old_last = _utc_ms(2023, 6, 27)
+    new_start = _utc_ms(2023, 8, 16)
+    new_last = _utc_ms(2026, 10, 29)
+    opens = list(range(old_start, old_last + 1, step))
+    opens.extend(range(new_start, new_last + 1, step))
+    false_start = _utc_ms(2023, 8, 17)
+    false_end = _utc_ms(2026, 10, 30)
+    gaps = find_missing_ranges("3d", opens, opens[0], new_last)
+    assert not any(gap[0] == false_start and gap[1] >= false_end for gap in gaps)
+    # A real hole on one phase is still reported. 1w stays on Mondays.
+    week = _utc_ms(2024, 1, 1)
+    assert align_open("1w", week) == week
+    missing_week = find_missing_ranges("1w", [week, week + 14 * 86_400_000], week, week + 14 * 86_400_000)
+    assert missing_week == [(week + 7 * 86_400_000, week + 7 * 86_400_000)]
+    jan = _utc_ms(2024, 1, 1)
+    mar = _utc_ms(2024, 3, 1)
+    missing_month = find_missing_ranges("1M", [jan, mar], jan, mar)
+    assert missing_month == [(_utc_ms(2024, 2, 1), _utc_ms(2024, 2, 1))]
 
 
 def test_kline_weight_tiers():

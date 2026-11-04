@@ -17,7 +17,11 @@ class DuckReader:
             self.con.execute(f"ATTACH '{uri}' AS market (TYPE SQLITE, READ_ONLY)")
 
     def close(self) -> None:
-        self.con.close()
+        con = getattr(self, "con", None)
+        if con is None:
+            return
+        con.close()
+        self.con = None
 
     def query(self, sql: str, params: list | None = None):
         stripped = sql.lstrip().lower()

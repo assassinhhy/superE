@@ -15,13 +15,15 @@ ETHUSDT 永续合约的行情采集、存储和只读查询。这一阶段是数
 
 ## 安装
 
-在仓库根目录：
+在仓库根目录。这台开发机上的 `uv` 不在 PATH 里，用 Python 模块方式调用：
 
 ```bat
-uv sync --all-groups
+python -m uv sync --all-groups
 ```
 
-没有 uv 时，用 Python 3.13 创建虚拟环境后执行 `pip install -e ".[dev]"` 也可以，但以 `uv.lock` 为准。
+已经把 `uv` 加进 PATH 的环境也可以直接写 `uv sync --all-groups`。没有 uv 时，用 Python 3.13 创建虚拟环境后执行 `pip install -e ".[dev]"` 也可以，但以 `uv.lock` 为准。
+
+如果 `git clone` 或 `git fetch` 走到了 `ghfast.top` 而不是 `github.com`，那是本机全局 git 的 `insteadOf` 改写，不是这个仓库的配置。需要直连 GitHub 时在本机改 `git config --global --get-regexp url`，不要把这条改写写进仓库。
 
 复制一份本机配置（可选，已被 git 忽略）：
 
@@ -39,6 +41,8 @@ Windows 在仓库根目录双击，或在命令行执行：
 启动superE.bat
 停止superE.bat
 ```
+
+启动脚本用 `Start-Process` 拉起两个进程，标准输出写到 `data\logs\ingestor.stdout.log` 和 `data\logs\api.stdout.log`，这样从 PowerShell 管道调用 bat 时不会一直等着子进程的输出句柄。停止脚本不再用 `timeout /t`（非交互时会立刻失败），而是最多等 30 秒让采集器先把暂存写成 Parquet 并做完 checkpoint，超时才按 PID 结束。
 
 启动脚本会拉起两个进程：
 

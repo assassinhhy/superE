@@ -22,7 +22,7 @@ async def run_smoke(cfg: AppConfig, seconds: float = 8.0) -> list[Check]:
     proxy = proxy_or_none(cfg.proxy.url)
     timeout = httpx.Timeout(20.0, connect=10.0)
     async with httpx.AsyncClient(proxy=proxy, timeout=timeout, follow_redirects=True) as client:
-        checks.append(await _get_json(client, cfg.endpoints.fapi + "/fapi/v1/time", "S1 合约时间"))
+        checks.append(await _get_json(client, cfg.endpoints.fapi + "/fapi/v1/time", "S1", "合约时间"))
         kline_url = cfg.endpoints.fapi + "/fapi/v1/klines"
         guard_url(kline_url)
         try:
@@ -60,31 +60,47 @@ async def run_smoke(cfg: AppConfig, seconds: float = 8.0) -> list[Check]:
         except Exception:
             checks.append(Check("S4", "PASS", "下单路径在发出前被拒绝，没有请求币安"))
 
-    checks.append(await _ws_once(cfg.endpoints.fstream_market, [f"{cfg.symbols.um.lower()}@kline_1m"], proxy, seconds, "S5 /market"))
+    checks.append(
+        await _ws_once(
+            cfg.endpoints.fstream_market,
+            [f"{cfg.symbols.um.lower()}@kline_1m"],
+            proxy,
+            seconds,
+            "S5",
+            "/market",
+        )
+    )
     checks.append(
         await _ws_once(
             cfg.endpoints.fstream_public,
             [f"{cfg.symbols.um.lower()}@depth20@100ms"],
             proxy,
             seconds,
-            "S6 /public depth20",
+            "S6",
+            "/public depth20",
         )
     )
     return checks
 
 
-async def _get_json(client: httpx.AsyncClient, url: str, label: str) -> Check:
+async def _get_json(client: httpx.AsyncClient, url: str, code: str, label: str) -> Check:
     guard_url(url)
     try:
         response = await client.get(url)
         ok = response.status_code == 200 and "serverTime" in response.json()
-        return Check("S1", "PASS" if ok else "FAIL", f"{label} HTTP {response.status_code}")
+        return Check(code, "PASS" if ok else "FAIL", f"{label} HTTP {response.status_code}")
     except Exception as exc:
-        return Check("S1", "FAIL", f"{label} 失败: {exc}")
+        return Check(code, "FAIL", f"{label} 失败: {exc}")
 
 
-async def _ws_once(url: str, streams: list[str], proxy: str | None, seconds: float, label: str) -> Check:
-    code = label.split()[0]
+async def _ws_once(
+    url: str,
+    streams: list[str],
+    proxy: str | None,
+    seconds: float,
+    code: str,
+    label: str,
+) -> Check:
     try:
         async with connect(
             url,
