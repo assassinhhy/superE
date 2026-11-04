@@ -28,6 +28,111 @@ def _zip(csv_text: str) -> tuple[bytes, str]:
     return blob, hashlib.sha256(blob).hexdigest()
 
 
+def test_metrics_upsert_keeps_null_ratios_and_is_idempotent(tmp_path: Path):
+    from pathlib import Path as FsPath
+
+    from supere.binance.parse import parse_metrics_csv
+    from supere.storage.db import Database
+
+    text = (FsPath(__file__).resolve().parent / "fixtures" / "ethusdt_metrics_empty_quotes.csv").read_text(
+        encoding="utf-8"
+    )
+    rows = parse_metrics_csv(text, "archive")
+    db = Database(tmp_path / "superE.sqlite")
+    db.upsert_metrics(rows)
+    db.upsert_metrics(rows)
+    stored = db.conn.execute(
+        "SELECT oi, top_acc_lsr, top_pos_lsr FROM um_metrics WHERE symbol='ETHUSDT' ORDER BY ts"
+    ).fetchall()
+    assert len(stored) == 4
+    assert stored[0][0] == "472000.00000000"
+    assert stored[0][1] == "1.2345"
+    assert stored[1][1] is None
+    assert stored[1][2] is None
+    # A later partial update must not wipe a ratio that was already stored.
+    rows[0].top_acc_lsr = None
+    db.upsert_metrics([rows[0]])
+    kept = db.conn.execute(
+        "SELECT top_acc_lsr FROM um_metrics WHERE symbol='ETHUSDT' ORDER BY ts LIMIT 1"
+    ).fetchone()
+    assert kept[0] == "1.2345"
+    db.close()
+
+
+def test_complete_kline_span_is_skipped(tmp_path: Path):
+    from datetime import UTC, datetime, timedelta
+
+    from supere.ingest.backfill import span_bounds, span_is_complete
+    from supere.intervals import iter_opens
+    from supere.storage.db import Database
+    from supere.storage.models import Kline
+
+    day = datetime(2024, 1, 2, tzinfo=UTC)
+    start_ms = int(day.timestamp() * 1000)
+    bounds = span_bounds("1m", start_ms, start_ms + 86_400_000)
+    assert bounds is not None
+    db = Database(tmp_path / "superE.sqlite")
+    rows = []
+    for index, open_time in enumerate(iter_opens("1m", bounds[0], bounds[1])):
+        rows.append(
+            Kline(
+                market="um",
+                symbol="ETHUSDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + 59_999,
+                o="1",
+                h="1",
+                l="1",
+                c="1",
+                volume="1",
+                quote_volume="1",
+                trades=1,
+                taker_buy_base="1",
+                taker_buy_quote="1",
+                source="archive",
+                ingested_at=1,
+                ingested_local=1,
+            )
+        )
+        if index == 10:
+            break
+    db.upsert_klines(rows)
+    assert span_is_complete(db, "um", "ETHUSDT", "1m", bounds[0], bounds[1]) is False
+    db.upsert_klines(
+        [
+            Kline(
+                market="um",
+                symbol="ETHUSDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + 59_999,
+                o="1",
+                h="1",
+                l="1",
+                c="1",
+                volume="1",
+                quote_volume="1",
+                trades=1,
+                taker_buy_base="1",
+                taker_buy_quote="1",
+                source="archive",
+                ingested_at=1,
+                ingested_local=1,
+            )
+            for open_time in iter_opens("1m", bounds[0], bounds[1])
+        ]
+    )
+    assert span_is_complete(db, "um", "ETHUSDT", "1m", bounds[0], bounds[1]) is True
+    # The next day is untouched, so a rerun still imports it.
+    nxt = day + timedelta(days=1)
+    nxt_ms = int(nxt.timestamp() * 1000)
+    nxt_bounds = span_bounds("1m", nxt_ms, nxt_ms + 86_400_000)
+    assert nxt_bounds is not None
+    assert span_is_complete(db, "um", "ETHUSDT", "1m", nxt_bounds[0], nxt_bounds[1]) is False
+    db.close()
+
+
 async def test_backfill_imports_archive_and_dedups(tmp_path: Path):
     csv = "1704067200000,1,2,0.5,1.5,10,1704070799999,15,4,3,4,0\n"
     blob, digest = _zip(csv)
