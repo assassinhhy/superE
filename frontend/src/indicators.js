@@ -18,7 +18,8 @@ export const INTERVALS = [
   { id: "1M", span: 1, type: "month" },
 ];
 
-export const PREDICT_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w", "1M"];
+/** Prediction stops at 4h (2026-11-05). Longer K-line intervals stay for charting only. */
+export const PREDICT_INTERVALS = ["5m", "15m", "30m", "1h", "4h"];
 
 /** Each period is its own main-pane instance. KLineChart's built-in MA would draw them as one indicator. */
 export const MA_LINES = [

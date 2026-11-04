@@ -28,12 +28,16 @@ import {
   vwap,
 } from "./indicators.js";
 
-test("the chart lists every UM interval, including the nine prediction periods", () => {
+test("the chart lists every UM interval, including the prediction periods", () => {
   const ids = INTERVALS.map((item) => item.id);
   assert.deepEqual(ids, [
     "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
   ]);
   for (const id of PREDICT_INTERVALS) assert.ok(ids.includes(id));
+});
+
+test("prediction stops at 4h; 12h, 1d, 1w and 1M are chart-only", () => {
+  assert.deepEqual(PREDICT_INTERVALS, ["5m", "15m", "30m", "1h", "4h"]);
 });
 
 test("UTC+8 formatting does not follow the machine zone", () => {

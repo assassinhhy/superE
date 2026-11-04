@@ -30,12 +30,6 @@ const kinds = {
   funding: "资金费率",
 };
 
-function role(id) {
-  if (id === "12h") return "实验，未做";
-  if (id === "1d" || id === "1w" || id === "1M") return "统计面板，未做";
-  return "未接入";
-}
-
 </script>
 
 <template>
@@ -85,7 +79,7 @@ function role(id) {
             <td>{{ id }}</td>
             <td>—</td>
             <td>—</td>
-            <td>{{ role(id) }}</td>
+            <td>未接入</td>
           </tr>
         </tbody>
       </table>
