@@ -38,6 +38,9 @@ __pycache__/
 dist/
 build/
 
+# 前端依赖和构建产物。构建结果由本机 API 提供，不进 git。
+node_modules/
+
 # 编辑器
 .idea/
 .vscode/

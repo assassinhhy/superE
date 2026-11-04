@@ -1,0 +1,154 @@
+<script setup>
+import { computed } from "vue";
+import { state } from "../live.js";
+import { PREDICT_INTERVALS, formatUtc8, formatUtc8Clock } from "../indicators.js";
+
+const props = defineProps({
+  market: { type: String, required: true },
+  interval: { type: String, required: true },
+});
+
+const formingBar = computed(() =>
+  state.forming.find((bar) => bar.market === props.market && bar.interval === props.interval),
+);
+
+const price = computed(() => formingBar.value?.c || (props.market === "um" ? state.ticker?.close : null) || "—");
+
+const change = computed(() => {
+  if (props.market !== "um") return null;
+  const open = Number(state.ticker?.open);
+  const close = Number(state.ticker?.close);
+  if (!open || !Number.isFinite(close)) return null;
+  return (close - open) / open;
+});
+
+const book = computed(() => {
+  const depth = state.depth;
+  if (!depth?.bids_px?.length) return { asks: [], bids: [], max: 1 };
+  const asks = depth.asks_px.map((px, index) => ({
+    px,
+    qty: depth.asks_qty?.[index] ?? "",
+  }));
+  const bids = depth.bids_px.map((px, index) => ({
+    px,
+    qty: depth.bids_qty?.[index] ?? "",
+  }));
+  const max = Math.max(
+    1,
+    ...asks.map((row) => Number(row.qty) || 0),
+    ...bids.map((row) => Number(row.qty) || 0),
+  );
+  return { asks: asks.slice(0, 20).reverse(), bids: bids.slice(0, 20), max };
+});
+
+const kinds = {
+  volume: "放量",
+  price_jump: "跳价",
+  liquidation: "强平",
+  oi: "持仓量",
+  funding: "资金费率",
+};
+
+function role(id) {
+  if (id === "12h") return "实验，未做";
+  if (id === "1d" || id === "1w" || id === "1M") return "统计面板，未做";
+  return "未接入";
+}
+
+function width(qty) {
+  const value = Number(qty);
+  if (!value) return "0%";
+  return `${Math.min(100, (value / book.value.max) * 100)}%`;
+}
+</script>
+
+<template>
+  <aside class="side">
+    <section>
+      <h2>实时</h2>
+      <p class="px" :class="change == null ? '' : change >= 0 ? 'up' : 'down'">{{ price }}</p>
+      <p v-if="market === 'um'" class="muted">
+        24h
+        <template v-if="change != null">{{ (change * 100).toFixed(2) }}%</template>
+        <template v-else>—</template>
+        · 成交额 {{ state.ticker?.quote_volume || "—" }}
+      </p>
+      <p v-else class="muted">现货只录 1 分钟，用来对照基差。24h 行情是合约的。</p>
+      <p class="muted">标记 {{ state.mark?.mark_price || "—" }} · 指数 {{ state.mark?.index_price || "—" }}</p>
+      <p class="muted">
+        预测资金费率 {{ state.mark?.rate || "—" }}
+        <span v-if="state.mark?.next_funding_time">· 下次 {{ formatUtc8Clock(state.mark.next_funding_time) }}</span>
+      </p>
+      <p class="fine">预测费率只在这里看，不画进历史资金费率。</p>
+    </section>
+
+    <section>
+      <h2>盘口 20 档</h2>
+      <p v-if="!book.asks.length" class="muted">还没有盘口。</p>
+      <div v-else class="book">
+        <div v-for="(row, index) in book.asks" :key="'a' + index" class="level ask">
+          <i :style="{ width: width(row.qty) }"></i>
+          <span>{{ row.px }}</span>
+          <span>{{ row.qty || "—" }}</span>
+        </div>
+        <div class="spread"></div>
+        <div v-for="(row, index) in book.bids" :key="'b' + index" class="level bid">
+          <i :style="{ width: width(row.qty) }"></i>
+          <span>{{ row.px }}</span>
+          <span>{{ row.qty || "—" }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>最新成交</h2>
+      <p v-if="!state.trades.length" class="muted">还没有成交。</p>
+      <ul v-else class="tape">
+        <li
+          v-for="trade in state.trades.slice(0, 18)"
+          :key="trade.agg_id + '-' + trade.ts"
+          :class="trade.is_buyer_maker ? 'down' : 'up'"
+        >
+          <span>{{ trade.price }}</span>
+          <span>{{ trade.qty }}</span>
+          <span>{{ formatUtc8Clock(trade.ts) }}</span>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>信号</h2>
+      <p class="fine">预测信号在第二阶段才接入。这里不计算方向，也不放占位概率。</p>
+      <table class="signals">
+        <thead>
+          <tr>
+            <th>周期</th>
+            <th>方向</th>
+            <th>概率</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="id in PREDICT_INTERVALS" :key="id">
+            <td>{{ id }}</td>
+            <td>—</td>
+            <td>—</td>
+            <td>{{ role(id) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>异动</h2>
+      <p v-if="!state.anomalies.length" class="muted">还没有异动。消息源第二阶段才采集，这里只显示市场异动。</p>
+      <ul v-else class="news">
+        <li v-for="item in state.anomalies" :key="item.id">
+          <strong>{{ kinds[item.kind] || item.kind }}</strong>
+          <span>{{ item.ts_utc8 || formatUtc8(item.ts) }}</span>
+          <em>{{ item.value }}</em>
+        </li>
+      </ul>
+    </section>
+  </aside>
+</template>

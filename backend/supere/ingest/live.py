@@ -215,6 +215,7 @@ class Ingestor:
             asyncio.create_task(self._stats_loop(), name="stats"),
             asyncio.create_task(self._backup_loop(), name="backup"),
             asyncio.create_task(self._status_loop(), name="status"),
+            asyncio.create_task(self._forming_loop(), name="forming"),
             asyncio.create_task(self._news_loop(), name="news"),
         ]
         await self.stop.wait()
@@ -444,7 +445,17 @@ class Ingestor:
             )
             self.coverage.add("um:aggTrade", utc8_date(parsed["ts"]), parsed["ts"])
             self._agg_state = (parsed["agg_id"], parsed["ts"])
-            await self.ipc.broadcast({"type": "aggTrade", "symbol": symbol, "price": parsed["price"], "qty": parsed["qty"], "ts": parsed["ts"], "agg_id": parsed["agg_id"]})
+            await self.ipc.broadcast(
+                {
+                    "type": "aggTrade",
+                    "symbol": symbol,
+                    "price": parsed["price"],
+                    "qty": parsed["qty"],
+                    "ts": parsed["ts"],
+                    "agg_id": parsed["agg_id"],
+                    "is_buyer_maker": bool(parsed.get("is_buyer_maker")),
+                }
+            )
         elif kind == "forceOrder":
             self._last_force_ms = parsed["event_ms"] or server_ms
             row = {
@@ -483,7 +494,19 @@ class Ingestor:
             await self.ipc.broadcast({"type": "markPrice", **{k: parsed[k] for k in ("symbol", "mark_price", "index_price", "rate", "next_funding_time", "event_ms")}})
         elif kind == "miniTicker":
             self._ticker = parsed
-            await self.ipc.broadcast({"type": "miniTicker", "symbol": symbol, "close": parsed["close"], "quote_volume": parsed["quote_volume"], "event_ms": parsed["event_ms"]})
+            await self.ipc.broadcast(
+                {
+                    "type": "miniTicker",
+                    "symbol": symbol,
+                    "open": parsed.get("open"),
+                    "high": parsed.get("high"),
+                    "low": parsed.get("low"),
+                    "close": parsed["close"],
+                    "volume": parsed.get("volume"),
+                    "quote_volume": parsed["quote_volume"],
+                    "event_ms": parsed["event_ms"],
+                }
+            )
 
     async def _on_public(self, parsed: dict) -> None:
         if parsed["kind"] != "depth":
@@ -508,7 +531,18 @@ class Ingestor:
         }
         self.store.append("depth", "um", symbol, utc8_date(server_ms), row)
         self.coverage.add("um:depth20", utc8_date(server_ms), server_ms)
-        await self.ipc.broadcast({"type": "depth", "symbol": symbol, "update_id": parsed["update_id"], "bids_px": parsed["bids_px"], "asks_px": parsed["asks_px"], "recv_ms": server_ms})
+        await self.ipc.broadcast(
+            {
+                "type": "depth",
+                "symbol": symbol,
+                "update_id": parsed["update_id"],
+                "bids_px": parsed["bids_px"],
+                "bids_qty": parsed["bids_qty"],
+                "asks_px": parsed["asks_px"],
+                "asks_qty": parsed["asks_qty"],
+                "recv_ms": server_ms,
+            }
+        )
 
     async def _on_spot(self, parsed: dict) -> None:
         if parsed["kind"] != "kline":
@@ -666,6 +700,19 @@ class Ingestor:
             if await self._sleep(600):
                 return
 
+    async def _forming_loop(self) -> None:
+        """Push in-memory candles often enough that aggTrade updates are not stuck behind the next kline tick.
+
+        The API snapshots this for the browser every 250ms. Nothing here is written to SQLite.
+        """
+        while not self.stop.is_set():
+            if self.ipc is not None and self.klines is not None:
+                bars = self.klines.snapshots()
+                if bars:
+                    await self.ipc.broadcast({"type": "forming", "bars": bars})
+            if await self._sleep(0.25):
+                return
+
     async def _status_loop(self) -> None:
         while not self.stop.is_set():
             server_ms, _local = self.stamp()
@@ -737,5 +784,7 @@ def _public_bar(bar, *, closed: bool) -> dict:
         "volume": bar.volume,
         "quote_volume": bar.quote_volume,
         "trades": bar.trades,
+        "taker_buy_base": bar.taker_buy_base,
+        "taker_buy_quote": bar.taker_buy_quote,
         "closed": closed,
     }

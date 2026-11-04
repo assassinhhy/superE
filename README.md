@@ -1,8 +1,8 @@
 # superE
 
-ETHUSDT 永续合约的行情采集、存储和只读查询。这一阶段是数据层：看行情、把数据落地，供以后做分析和预测。程序不下单，也不读取币安 API key。
+ETHUSDT 永续合约的行情采集、存储和只读看盘。程序不下单，也不读取币安 API key。
 
-界面（Vue3 + KLineChart、pywebview）属于下一阶段，这里还没有。
+界面用 Vue3 + KLineChart，窗口用 pywebview。浏览器只连本机 `127.0.0.1:8766`，不直连币安。预测信号留到第二阶段，界面上不放占位方向或概率。
 
 ## 环境
 
@@ -33,6 +33,52 @@ copy config.toml config.local.toml
 
 `config.local.toml` 里可以改数据目录，例如 `dir = "D:\\Tool\\cg\\superE\\data"`。不要把密钥写进任何 toml。以后用到的 DeepSeek 密钥只读环境变量 `DEEPSEEK_API_KEY`。
 
+## 界面
+
+前端在 `frontend/`。锁定文件是 `pnpm-lock.yaml`。构建结果在 `frontend/dist`，由本机 API 直接提供，里面没有 CDN 字体或远程脚本，断网也能开窗口。
+
+需要 Node.js。在 `frontend` 目录：
+
+```bat
+pnpm install
+pnpm test
+pnpm build
+```
+
+没有 pnpm 时，用 npm 安装同一份 `package.json`。npm 不会更新 `pnpm-lock.yaml`，锁定仍以 pnpm 为准：
+
+```bat
+npm install
+npm test
+npm run build
+```
+
+装完依赖之后，`pnpm build` / `npm run build` 不再访问网络。KLineChart 10.1.0 是 Apache-2.0，打包结果里带有 TradingView Lightweight Charts 的出处，状态栏也留了 [tradingview.com](https://www.tradingview.com/) 链接。说明在 `frontend/NOTICE`。
+
+窗口：
+
+```bat
+.venv\Scripts\python.exe -m supere desktop
+```
+
+它会等到 `http://127.0.0.1:8766/api/health` 再打开 pywebview。Windows 用系统里的 WebView2，不另带浏览器。开发时也可以先 `pnpm dev`，Vite 在 `127.0.0.1:5173`，并把 `/api` 和 `/ws` 代理到 8766。
+
+连不上币安时，用合成数据看界面，不启动采集器：
+
+```bat
+.venv\Scripts\python.exe -m supere preview --no-window
+```
+
+预览库在 `data/preview`，API 进程只读打开它。页面上会标明这是预览数据。
+
+「预测」页：合约 15 个周期的 K 线，现货参考只有 1 分钟。主图可叠 MA、EMA、BOLL、SAR、VWAP，副图可加减 VOL、MACD、RSI、KDJ、ATR、OBV、CVD、OI、资金费率、多空比、主动买卖比、基差、溢价、清算量。ATR 和 VWAP 是自己写的，KLineChart 没有这两项。ATR 用 Wilder 平滑，VWAP 按币安的 UTC 日切段。时间轴固定 UTC+8。右侧是价格、20 档盘口、最新成交、空的信号表和异动。信号表九行都是「未接入」，12 小时标成实验，1 日 / 1 周 / 1 月标成统计面板，都还没做。
+
+「训练」页有六个子页。数据管理读 `coverage` 和自录流，可以做 1 分钟聚合校验（只读）。初始化历史、补缺口、导出不会从网页写数据库，按钮给出要在本机跑的命令。特征、训练、回测、模型、重训监控只留第二阶段或第三阶段的说明。
+
+设置只展示代理、数据目录、费率和异动阈值。要改就编辑 `config.local.toml` 再重启。
+
+进模型的特征和 TA-Lib 同一套计算放在第二阶段。现在图上的 ATR、VWAP、CVD 只给看盘，参数写在前端，并有单独的公式测试。
+
 ## 启动和停止
 
 Windows 在仓库根目录双击，或在命令行执行：
@@ -42,20 +88,22 @@ Windows 在仓库根目录双击，或在命令行执行：
 停止superE.bat
 ```
 
-启动脚本用 `Start-Process` 拉起两个进程，标准输出写到 `data\logs\ingestor.stdout.log` 和 `data\logs\api.stdout.log`，这样从 PowerShell 管道调用 bat 时不会一直等着子进程的输出句柄。停止脚本不再用 `timeout /t`（非交互时会立刻失败），而是最多等 30 秒让采集器先把暂存写成 Parquet 并做完 checkpoint，超时才按 PID 结束。
+启动脚本用 `Start-Process` 拉起进程，标准输出写到 `data\logs\`，这样从 PowerShell 管道调用 bat 时不会一直等着子进程的输出句柄。停止脚本不再用 `timeout /t`（非交互时会立刻失败），而是最多等 30 秒让采集器先把暂存写成 Parquet 并做完 checkpoint，超时才按 PID 结束。
 
-启动脚本会拉起两个进程：
+启动脚本会拉起三个进程：
 
 - 采集器：唯一可以写 SQLite 的进程。第二个实例拿不到 `data\superE.lock` 会直接退出。
-- 只读 API：`http://127.0.0.1:8766`（8765 留给别的项目）。
+- 只读 API：`http://127.0.0.1:8766`（8765 留给别的项目）。若 `frontend\dist` 已构建，API 同时提供界面。
+- 桌面窗口：`python -m supere desktop`。API 还没就绪时它会自己等。
 
-停止脚本先请求 `POST /api/shutdown`。请求失败时，按 `data\run\ingestor.pid` 和 `data\run\api.pid` 结束进程。
+停止脚本先关掉窗口，再请求 `POST /api/shutdown`。请求失败时，按 `data\run\ingestor.pid`、`data\run\api.pid` 和 `data\run\desktop.pid` 结束进程。
 
 等价命令：
 
 ```bat
 .venv\Scripts\python.exe -m supere ingestor
 .venv\Scripts\python.exe -m supere api
+.venv\Scripts\python.exe -m supere desktop
 ```
 
 API 和采集器之间用本机 WebSocket 传未收盘 K 线和盘口，默认 `127.0.0.1:8767`。训练和界面都不要直接写数据库。
@@ -127,7 +175,8 @@ uv run pytest
 ## 目录
 
 ```
-backend/supere/     采集器、API、存储、消息面骨架
+backend/supere/     采集器、API、存储、窗口、预览数据
+frontend/           Vue3 + KLineChart。构建产物不进 git
 config.toml         可提交的默认配置
 data/               运行后生成，不进 git
 docs/架构.md

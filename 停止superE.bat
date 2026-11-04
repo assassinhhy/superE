@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
+echo closing desktop window
+call :killpid "%~dp0data\run\desktop.pid"
 echo asking API to shut down
 curl.exe -s -m 5 -X POST http://127.0.0.1:8766/api/shutdown >nul
 rem timeout.exe fails with "input redirection is not supported" when stdin
@@ -16,6 +18,7 @@ goto wait
 echo graceful shutdown exceeded 30s, killing by pid
 call :killpid "%~dp0data\run\ingestor.pid"
 call :killpid "%~dp0data\run\api.pid"
+call :killpid "%~dp0data\run\desktop.pid"
 goto end
 :clean
 echo superE stopped

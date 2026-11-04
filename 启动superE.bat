@@ -23,6 +23,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FileP
 ping 127.0.0.1 -n 3 >nul
 echo starting api on 127.0.0.1:8766
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','api' -WorkingDirectory '%CD%' -WindowStyle Minimized -RedirectStandardOutput '%CD%\data\logs\api.stdout.log' -RedirectStandardError '%CD%\data\logs\api.stderr.log'" <nul
+echo starting window
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','desktop' -WorkingDirectory '%CD%' -WindowStyle Normal -RedirectStandardOutput '%CD%\data\logs\desktop.stdout.log' -RedirectStandardError '%CD%\data\logs\desktop.stderr.log'" <nul
 echo superE started. API http://127.0.0.1:8766/api/health
-echo stdout logs: data\logs\ingestor.stdout.log and data\logs\api.stdout.log
+echo stdout logs: data\logs\ingestor.stdout.log , data\logs\api.stdout.log , data\logs\desktop.stdout.log
 endlocal

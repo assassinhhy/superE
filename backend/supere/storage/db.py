@@ -199,6 +199,84 @@ class Database:
             )
         )
 
+    def metrics_between(
+        self,
+        symbol: str,
+        start: int | None,
+        end: int | None,
+        limit: int = 2000,
+    ) -> list[sqlite3.Row]:
+        clauses = ["symbol=?"]
+        params: list[object] = [symbol]
+        if start is not None:
+            clauses.append("ts>=?")
+            params.append(start)
+        if end is not None:
+            clauses.append("ts<=?")
+            params.append(end)
+        params.append(limit)
+        where = " AND ".join(clauses)
+        sql = f"""
+            SELECT * FROM (
+              SELECT * FROM um_metrics WHERE {where}
+              ORDER BY ts DESC LIMIT ?
+            ) ORDER BY ts ASC
+        """
+        return list(self.conn.execute(sql, params))
+
+    def funding_between(
+        self,
+        symbol: str,
+        start: int | None,
+        end: int | None,
+        limit: int = 500,
+    ) -> list[sqlite3.Row]:
+        clauses = ["symbol=?"]
+        params: list[object] = [symbol]
+        if start is not None:
+            clauses.append("funding_time>=?")
+            params.append(start)
+        if end is not None:
+            clauses.append("funding_time<=?")
+            params.append(end)
+        params.append(limit)
+        where = " AND ".join(clauses)
+        sql = f"""
+            SELECT * FROM (
+              SELECT * FROM funding WHERE {where}
+              ORDER BY funding_time DESC LIMIT ?
+            ) ORDER BY funding_time ASC
+        """
+        return list(self.conn.execute(sql, params))
+
+    def latest_runtime(self, venue: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM runtime_stats WHERE venue=? ORDER BY ts DESC LIMIT 1",
+            (venue,),
+        ).fetchone()
+
+    def list_signals(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM signals ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+        )
+
+    def list_jobs(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM jobs ORDER BY COALESCE(started_at, 0) DESC LIMIT ?",
+                (limit,),
+            )
+        )
+
+    def list_models(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM models ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+        )
+
     def upsert_funding(self, rows: list[FundingRow]) -> None:
         if not rows:
             return
