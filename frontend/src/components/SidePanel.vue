@@ -74,12 +74,6 @@ function width(qty) {
         · 成交额 {{ state.ticker?.quote_volume || "—" }}
       </p>
       <p v-else class="muted">现货只录 1 分钟，用来对照基差。24h 行情是合约的。</p>
-      <p class="muted">标记 {{ state.mark?.mark_price || "—" }} · 指数 {{ state.mark?.index_price || "—" }}</p>
-      <p class="muted">
-        预测资金费率 {{ state.mark?.rate || "—" }}
-        <span v-if="state.mark?.next_funding_time">· 下次 {{ formatUtc8Clock(state.mark.next_funding_time) }}</span>
-      </p>
-      <p class="fine">预测费率只在这里看，不画进历史资金费率。</p>
     </section>
 
     <section>
