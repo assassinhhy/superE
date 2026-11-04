@@ -5,11 +5,14 @@ import { api } from "../api.js";
 import { state } from "../live.js";
 import {
   INTERVALS,
+  MA_LINES,
   atr,
   cvd,
   joinBarExtras,
+  maCreate,
   paintDelay,
   toBar,
+  toggleMember,
   vwap,
 } from "../indicators.js";
 
@@ -20,7 +23,7 @@ const props = defineProps({
 
 const host = ref(null);
 const message = ref("");
-const enabled = ref(new Set(["MA", "VWAP", "VOL", "ATR"]));
+const enabled = ref(new Set([...MA_LINES.map((line) => line.id), "VWAP", "VOL", "ATR"]));
 let chart = null;
 let pushBar = null;
 let pending = [];
@@ -30,7 +33,7 @@ let seenClosed = new Set();
 let resizeObserver = null;
 
 const MAIN = [
-  { id: "MA", label: "MA" },
+  ...MA_LINES.map((line) => ({ id: line.id, label: line.id, ma: line })),
   { id: "EMA", label: "EMA" },
   { id: "BOLL", label: "BOLL" },
   { id: "SAR", label: "SAR" },
@@ -219,30 +222,41 @@ function loader() {
   };
 }
 
-function mountIndicators() {
-  for (const id of enabled.value) {
-    const name = indicatorName(id);
-    if (MAIN.some((item) => item.id === id)) {
-      chart.createIndicator({ name, paneId: "candle_pane" }, true);
-    } else {
-      chart.createIndicator(name);
-    }
+function mainItem(id) {
+  return MAIN.find((item) => item.id === id);
+}
+
+function showIndicator(id) {
+  const item = mainItem(id);
+  if (item?.ma) {
+    chart.createIndicator(maCreate(item.ma), true);
+    return;
   }
+  const name = indicatorName(id);
+  if (item) {
+    chart.createIndicator({ name, paneId: "candle_pane" }, true);
+    return;
+  }
+  chart.createIndicator(name);
+}
+
+function hideIndicator(id) {
+  const item = mainItem(id);
+  if (item?.ma) {
+    chart.removeIndicator({ id: item.ma.id });
+    return;
+  }
+  chart.removeIndicator({ name: indicatorName(id) });
+}
+
+function mountIndicators() {
+  for (const id of enabled.value) showIndicator(id);
 }
 
 function toggle(id) {
-  const name = indicatorName(id);
-  const next = new Set(enabled.value);
-  if (next.has(id)) {
-    chart.removeIndicator({ name });
-    next.delete(id);
-  } else if (MAIN.some((item) => item.id === id)) {
-    chart.createIndicator({ name, paneId: "candle_pane" }, true);
-    next.add(id);
-  } else {
-    chart.createIndicator(name);
-    next.add(id);
-  }
+  const next = toggleMember(enabled.value, id);
+  if (next.has(id)) showIndicator(id);
+  else hideIndicator(id);
   enabled.value = next;
 }
 

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   INTERVALS,
+  MA_LINES,
   PREDICT_INTERVALS,
   asofSeries,
   atr,
@@ -12,7 +13,9 @@ import {
   isBackfilling,
   joinBarExtras,
   liquidationQuote,
+  maCreate,
   paintDelay,
+  toggleMember,
   vwap,
 } from "./indicators.js";
 
@@ -121,4 +124,29 @@ test("backfill banner ignores the standing BACKFILL_REQUIRED notice", () => {
 test("redraw throttle waits out the remainder of 250ms", () => {
   assert.equal(paintDelay(1000, 800), 50);
   assert.equal(paintDelay(1100, 800), 0);
+});
+
+test("each MA period is its own indicator, so MA10 and MA60 toggle separately", () => {
+  const byId = Object.fromEntries(MA_LINES.map((line) => [line.id, line]));
+  const ma10 = maCreate(byId.MA10);
+  const ma60 = maCreate(byId.MA60);
+  assert.deepEqual(ma10.calcParams, [10]);
+  assert.deepEqual(ma60.calcParams, [60]);
+  assert.equal(ma10.id, "MA10");
+  assert.equal(ma60.id, "MA60");
+  assert.notEqual(ma10.styles.lines[0].color, ma60.styles.lines[0].color);
+
+  let on = new Set(MA_LINES.map((line) => line.id));
+  on = toggleMember(on, "MA10");
+  assert.equal(on.has("MA10"), false);
+  assert.equal(on.has("MA60"), true);
+  assert.equal(on.has("MA5"), true);
+  on = toggleMember(on, "MA60");
+  assert.equal(on.has("MA60"), false);
+  on = toggleMember(on, "MA10");
+  on = toggleMember(on, "MA60");
+  assert.equal(on.has("MA10") && on.has("MA60"), true);
+  on = toggleMember(on, "MA10");
+  on = toggleMember(on, "MA60");
+  assert.equal(on.has("MA10") || on.has("MA60"), false);
 });

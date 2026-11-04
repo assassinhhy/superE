@@ -20,6 +20,33 @@ export const INTERVALS = [
 
 export const PREDICT_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w", "1M"];
 
+/** Built-in KLineChart MA draws 5/10/30/60 as one indicator. Each entry is its own instance. */
+export const MA_LINES = [
+  { id: "MA5", period: 5, color: "#FF9600" },
+  { id: "MA10", period: 10, color: "#935EBD" },
+  { id: "MA30", period: 30, color: "#1677FF" },
+  { id: "MA60", period: 60, color: "#E11D74" },
+];
+
+export function maCreate(line) {
+  return {
+    name: "MA",
+    id: line.id,
+    paneId: "candle_pane",
+    calcParams: [line.period],
+    styles: {
+      lines: [{ style: "solid", smooth: false, size: 1, dashedValue: [2, 2], color: line.color }],
+    },
+  };
+}
+
+export function toggleMember(enabled, id) {
+  const next = new Set(enabled);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
 const ACTIVE_FILL = new Set(["GAP_FILL", "BACKFILL"]);
 
 export function formatUtc8(ms) {
