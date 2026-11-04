@@ -16,10 +16,12 @@ function query(params) {
   return search.toString();
 }
 
-export async function loadOlderSeries(fetchPage, timeKey, until) {
+// fetchPage(end) must return the newest page at or before `end` (undefined = newest overall).
+// The first call should pass the chart batch's own end, so older bars get their own window.
+export async function loadOlderSeries(fetchPage, timeKey, until, maxPages = 8) {
   let rows = [];
   let end;
-  for (let page = 0; page < 8; page += 1) {
+  for (let page = 0; page < maxPages; page += 1) {
     const batch = await fetchPage(end);
     const next = appendOlderPage(rows, batch, timeKey);
     rows = next.rows;

@@ -4,15 +4,19 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, loadOlderSeries } from "../api.js";
 import { state } from "../live.js";
 import {
+  AXIS_PX,
   INTERVALS,
   MAIN_PANE_PX,
   MA_LINES,
+  PRIMARY_SUB,
   SERIES_PAGE,
   SUB_PANE_PX,
   atr,
   chartBodyHeight,
   joinBarExtras,
   maCreate,
+  mainPaneFit,
+  metricPagesFor,
   paintDelay,
   toBar,
   toggleMember,
@@ -26,8 +30,9 @@ const props = defineProps({
 const scrollEl = ref(null);
 const host = ref(null);
 const message = ref("");
-const enabled = ref(new Set(["BOLL", "MACD", "ATR", "OI", "FUNDING", "LSR", "TAKER"]));
+const enabled = ref(new Set(["BOLL", "MACD", "RSI", "ATR", "OI", "FUNDING", "LSR", "TAKER"]));
 let chart = null;
+let mainHeight = 0;
 let pushBar = null;
 let pending = [];
 let timer = null;
@@ -40,7 +45,8 @@ const MAIN = [
   { id: "BOLL", label: "BOLL" },
 ];
 const SUB = [
-  { id: "MACD", label: "MACD" },
+  { id: PRIMARY_SUB, label: "MACD" },
+  { id: "RSI", label: "RSI" },
   { id: "ATR", label: "ATR" },
   { id: "OI", label: "OI" },
   { id: "FUNDING", label: "资金费率" },
@@ -110,19 +116,21 @@ async function decorate(rawBars) {
   const start = bars[0].timestamp - 86_400_000;
   const end = bars[bars.length - 1].closeTime;
   const liqStart = Math.max(start, end - 14 * 86_400_000);
+  // 指标窗口必须锚定在这一批 K 线的末尾，不能从"最新一页"开始往回翻。
   const [metricRows, fundingRows, spot, premium, liq] = await Promise.all([
     loadOlderSeries(
       (cursor) =>
         api
-          .metrics({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor })
+          .metrics({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor ?? end })
           .then((body) => body.rows || []),
       "ts",
       start,
+      metricPagesFor(end - start),
     ).catch(() => []),
     loadOlderSeries(
       (cursor) =>
         api
-          .funding({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor })
+          .funding({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor ?? end })
           .then((body) => body.settled || []),
       "funding_time",
       start,
@@ -246,19 +254,37 @@ function subCount() {
 function reflow() {
   if (!chart || !host.value || !scrollEl.value) return;
   const sep = Number(chart.getStyles()?.separator?.size) || 1;
-  const needed = chartBodyHeight(subCount(), { separator: sep, axis: 36 });
   const viewport = scrollEl.value.clientHeight || 0;
+  // Candle + MACD fill the first screen; the other subs start below the fold.
+  const main = mainPaneFit(viewport, { hasPrimarySub: enabled.value.has(PRIMARY_SUB), separator: sep, axis: AXIS_PX });
+  if (main !== mainHeight) {
+    mainHeight = main;
+    chart.setPaneOptions({ id: "candle_pane", height: main, minHeight: MAIN_PANE_PX });
+  }
+  const needed = chartBodyHeight(subCount(), { separator: sep, axis: AXIS_PX, mainPx: main });
   const next = Math.max(needed, viewport);
   if (Math.abs(host.value.getBoundingClientRect().height - next) < 2) return;
   host.value.style.height = `${next}px`;
   chart.resize();
 }
 
+/** Remove the subs that were on, then re-add the enabled ones in SUB order, so MACD is the first sub pane. */
+function restackSubs(before) {
+  for (const item of SUB) {
+    if (before.has(item.id)) chart.removeIndicator({ name: indicatorName(item.id) });
+  }
+  for (const item of SUB) {
+    if (enabled.value.has(item.id)) chart.createIndicator(indicatorName(item.id));
+  }
+}
+
 function toggle(id) {
-  const next = toggleMember(enabled.value, id);
-  if (next.has(id)) showIndicator(id);
-  else hideIndicator(id);
+  const before = enabled.value;
+  const next = toggleMember(before, id);
   enabled.value = next;
+  if (id === PRIMARY_SUB && next.has(id)) restackSubs(before);
+  else if (next.has(id)) showIndicator(id);
+  else hideIndicator(id);
   reflow();
 }
 

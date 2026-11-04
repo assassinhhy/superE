@@ -28,11 +28,24 @@ export const MA_LINES = [
 
 /** Sub panes keep this height. The chart body grows and the pane scrolls instead of crushing them. */
 export const SUB_PANE_PX = 156;
+/** Floor for the candle pane. Above this, the candle fills whatever the first screen has left. */
 export const MAIN_PANE_PX = 340;
+export const AXIS_PX = 36;
+/** The only sub pane that sits on the first screen. Every other sub pane is reached by scrolling. */
+export const PRIMARY_SUB = "MACD";
 
-export function chartBodyHeight(subCount, { separator = 1, axis = 36 } = {}) {
+export function chartBodyHeight(subCount, { separator = 1, axis = AXIS_PX, mainPx = MAIN_PANE_PX } = {}) {
   const subs = Math.max(0, subCount);
-  return MAIN_PANE_PX + subs * SUB_PANE_PX + subs * separator + axis;
+  return mainPx + subs * SUB_PANE_PX + subs * separator + axis;
+}
+
+/**
+ * Candle pane height that makes candle + MACD exactly fill the visible viewport.
+ * Without MACD the candle takes the whole viewport. Never below MAIN_PANE_PX.
+ */
+export function mainPaneFit(viewport, { hasPrimarySub = true, separator = 1, axis = AXIS_PX } = {}) {
+  const reserved = axis + (hasPrimarySub ? SUB_PANE_PX + separator : 0);
+  return Math.max(MAIN_PANE_PX, Math.floor((Number(viewport) || 0) - reserved));
 }
 
 export function maCreate(line) {
@@ -80,6 +93,15 @@ export function appendOlderPage(collected, page, timeKey) {
     rows.push(row);
   }
   return { rows, cursor: min - 1, grew: true };
+}
+
+// 5 分钟指标：窗口里有多少 5m bar，就需要多少页（加 2 页余量）。
+// 不能用写死的页数，否则更早的窗口会被悄悄截掉。
+export const METRIC_STEP_MS = 300_000;
+
+export function metricPagesFor(spanMs, stepMs = METRIC_STEP_MS) {
+  if (!Number.isFinite(spanMs) || spanMs <= 0) return 1;
+  return Math.ceil(spanMs / stepMs / SERIES_PAGE) + 2;
 }
 
 const ACTIVE_FILL = new Set(["GAP_FILL", "BACKFILL"]);

@@ -37,6 +37,54 @@ def test_metrics_and_funding_accept_the_chart_page_size(db: Database):
     assert funding.json()["settled"][0]["rate"] == "0.0001"
 
 
+def test_metrics_and_funding_page_backwards_with_end(db: Database):
+    from supere.storage.models import FundingRow, MetricRow
+
+    base = 1_700_000_000_000
+    step = 300_000
+    db.upsert_metrics(
+        [MetricRow(symbol="ETHUSDT", ts=base + k * step, oi=str(k), source="test") for k in range(6)]
+    )
+    eight_h = 28_800_000
+    db.upsert_funding(
+        [FundingRow("ETHUSDT", base + k * eight_h, str(k), "3500", "test") for k in range(6)]
+    )
+    app = create_app(AppConfig(), DataAccess(db), LiveHub(), connect_ipc=False)
+    with TestClient(app) as client:
+        # Newest page with no window: the last `limit` rows, ascending.
+        newest = client.get("/api/metrics", params={"symbol": "ETHUSDT", "limit": 2}).json()["rows"]
+        assert [int(r["ts"]) for r in newest] == [base + 4 * step, base + 5 * step]
+        # `end` anchors the window: the two rows at or before base+3*step, nothing newer.
+        window = client.get(
+            "/api/metrics",
+            params={"symbol": "ETHUSDT", "end": base + 3 * step, "limit": 2},
+        ).json()["rows"]
+        assert [int(r["ts"]) for r in window] == [base + 2 * step, base + 3 * step]
+        # Paging back: the next page ends just before the oldest row we already have.
+        older = client.get(
+            "/api/metrics",
+            params={"symbol": "ETHUSDT", "end": base + 2 * step - 1, "limit": 2},
+        ).json()["rows"]
+        assert [int(r["ts"]) for r in older] == [base, base + step]
+        # start and end together bound both sides.
+        bounded = client.get(
+            "/api/metrics",
+            params={"symbol": "ETHUSDT", "start": base + step, "end": base + 2 * step, "limit": 10},
+        ).json()["rows"]
+        assert [int(r["ts"]) for r in bounded] == [base + step, base + 2 * step]
+        # Funding pages the same way.
+        fund_window = client.get(
+            "/api/funding",
+            params={"symbol": "ETHUSDT", "end": base + 3 * eight_h, "limit": 2},
+        ).json()["settled"]
+        assert [int(r["funding_time"]) for r in fund_window] == [base + 2 * eight_h, base + 3 * eight_h]
+        fund_older = client.get(
+            "/api/funding",
+            params={"symbol": "ETHUSDT", "end": base + 2 * eight_h - 1, "limit": 2},
+        ).json()["settled"]
+        assert [int(r["funding_time"]) for r in fund_older] == [base, base + eight_h]
+
+
 def test_origin_stays_on_loopback():
     assert origin_of(AppConfig()) == "http://127.0.0.1:8766"
 
