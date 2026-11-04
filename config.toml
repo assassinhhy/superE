@@ -1,0 +1,88 @@
+# superE 数据层配置。本文件可以提交。
+# 本机覆盖写在 config.local.toml（已 gitignore），不要把密钥写进任何一个 toml。
+# DeepSeek 等密钥只读环境变量 DEEPSEEK_API_KEY。币安公开行情不使用 key。
+
+[proxy]
+url = "http://127.0.0.1:7890"
+no_proxy = "127.0.0.1,localhost"
+
+[server]
+api_host = "127.0.0.1"
+api_port = 8766
+ipc_host = "127.0.0.1"
+ipc_port = 8767
+
+[endpoints]
+fapi = "https://fapi.binance.com"
+spot_rest = "https://api.binance.com"
+spot_rest_fallback = "https://data-api.binance.vision"
+vision = "https://data.binance.vision/data"
+fstream_market = "wss://fstream.binance.com/market/ws"
+fstream_public = "wss://fstream.binance.com/public/ws"
+spot_ws = "wss://stream.binance.com:9443/ws"
+
+[data]
+# 相对路径相对于 config.toml 所在目录。Windows 上可改成绝对路径，例如 D:\Tool\cg\superE\data
+dir = "data"
+
+[symbols]
+um = "ETHUSDT"
+spot = "ETHUSDT"
+
+[rate_limit]
+futures_weight_per_min = 2400
+futures_budget_ratio = 0.5
+spot_weight_per_min = 6000
+spot_budget_ratio = 0.5
+futures_data_requests_per_5min = 1000
+futures_data_budget_ratio = 0.5
+header_slowdown_ratio = 0.6
+# aggTrades 权重官方原文未核实，按保守值 20
+agg_trade_weight = 20
+funding_weight = 1
+open_interest_weight = 1
+
+[clock]
+recalibrate_seconds = 600
+samples = 3
+warn_abs_ms = 2000
+change_alert_ms = 500
+
+[ingest]
+reconnect_hours = 23
+overlap_confirm_messages = 5
+parquet_flush_seconds = 30
+jsonl_fsync_seconds = 1
+aggtrade_archive_gap_hours = 2
+kline_verify_delay_seconds = 60
+depth_gap_ms = 2000
+metrics_poll_seconds = 300
+mark_kline_poll_seconds = 60
+wal_checkpoint_seconds = 300
+client_ping_seconds = 20
+startup_tail_limit = 499
+archive_gap_days = 7
+
+[disk]
+warn_free_gb = 50
+critical_free_gb = 20
+
+[anomaly]
+volume_median_mult = 5
+price_atr_mult = 4
+price_10s_pct = 0.5
+liq_single_usd = 1000000
+liq_minute_usd = 5000000
+oi_change_pct = 3
+funding_jump_abs = 0.0005
+atr_period = 14
+
+[news]
+# 1a 只放适配器。启用后才会出网，例如 ["alternative_me"]
+enabled_sources = []
+fear_greed_poll_seconds = 21600
+
+[backup]
+hour_utc8 = 3
+keep_days = 14
+restore_drill_days = 30

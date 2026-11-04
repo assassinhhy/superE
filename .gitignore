@@ -1,0 +1,43 @@
+# 方案、复核、计划，不进仓库
+方案.md
+方案*.md
+CC复核结果.md
+CC复核清单.md
+*复核*.md
+*计划书*
+*计划*.md
+DONE.md
+**/DONE.md
+*.bak.md
+
+# 实测临时目录和日志
+_depthtest/
+cc_run.log
+
+# 数据、密钥、本机配置
+data/
+config.local.toml
+.env
+.env.*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.parquet
+
+# 验收脚本的临时目录
+.accept-tmp/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# 编辑器
+.idea/
+.vscode/
