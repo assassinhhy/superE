@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from supere import __version__
 from supere.config import load_config
@@ -21,10 +22,19 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("backfill", help="从 data.binance.vision 导入历史，不启动实时连接")
     sub.add_parser("api", help="只读 API，默认 127.0.0.1:8766")
+    detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
+    detach.add_argument("role", choices=("ingestor", "api"))
     sub.add_parser("backup", help="立刻做一次 SQLite 在线备份和 Parquet 增量复制")
     sub.add_parser("restore-drill", help="把最近一份备份复制出来做完整性检查，不替换正在用的库")
 
     args = parser.parse_args(argv)
+    if args.cmd == "detach":
+        from supere.spawn import spawn_service
+
+        root = Path(args.config).resolve().parent if args.config else Path.cwd()
+        pid = spawn_service(args.role, root=root)
+        print(pid)
+        return
     try:
         cfg, path = load_config(args.config)
     except Exception as exc:

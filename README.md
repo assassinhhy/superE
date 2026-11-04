@@ -42,7 +42,15 @@ Windows 在仓库根目录双击，或在命令行执行：
 停止superE.bat
 ```
 
-启动脚本用 `Start-Process` 拉起两个进程，标准输出写到 `data\logs\ingestor.stdout.log` 和 `data\logs\api.stdout.log`，这样从 PowerShell 管道调用 bat 时不会一直等着子进程的输出句柄。停止脚本不再用 `timeout /t`（非交互时会立刻失败），而是最多等 30 秒让采集器先把暂存写成 Parquet 并做完 checkpoint，超时才按 PID 结束。
+启动脚本调用 `python -m supere detach`。这个命令用 `DETACHED_PROCESS` 拉起服务，并且只把 stdin/stdout/stderr 交给子进程（`close_fds`），所以从 PowerShell 执行 `cmd /c 启动superE.bat`，哪怕套在管道里，也会在服务还活着的时候返回。进程自己的 print 写到 `data\logs\ingestor.stdout.log` 和 `data\logs\api.stdout.log`。程序日志是按进程分开的 `data\logs\supere-ingestor-YYYY-MM-DD.log` 和 `supere-api-YYYY-MM-DD.log`，避免两个进程同时追加把汉字切断。
+
+在本机检查启动会不会卡住（会真正启动再停止）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_launch_returns.ps1
+```
+
+停止脚本不再用 `timeout /t`（非交互时会立刻失败），而是最多等 30 秒让采集器先把暂存写成 Parquet 并做完 checkpoint，超时才按 PID 结束。关闭时日志里会有「采集器开始关闭」和「采集器已关闭」。
 
 启动脚本会拉起两个进程：
 
@@ -143,7 +151,7 @@ scripts/            冒烟和验收
 - `raw/`：按 UTC+8 日期分区的 zstd Parquet（盘口、逐笔、强平）
 - `archive_cache/`：下载的 zip，可以删
 - `backups/`：SQLite 备份和 Parquet 增量副本
-- `logs/`：按 UTC+8 日期滚动，日志里的密钥样式文本会被打码
+- `logs/`：按进程、按 UTC+8 日期滚动（`supere-ingestor-*.log`、`supere-api-*.log`），密钥样式文本会打码
 
 ## 时间
 

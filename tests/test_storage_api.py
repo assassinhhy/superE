@@ -338,6 +338,87 @@ def test_shutdown_flushes_staging_and_wal(tmp_path: Path, db: Database):
     assert check.status == "PASS", check.detail
 
 
+def test_log_file_keeps_chinese_and_shutdown_lines(tmp_path: Path):
+    import logging
+
+    from supere.logging_setup import flush_logs, setup_logging
+
+    setup_logging(tmp_path, "ingestor")
+    log = logging.getLogger("supere")
+    log.info("请检查 Windows 时间同步")
+    log.info("market 已连接")
+    log.info("采集器开始关闭，先写入暂存并做 checkpoint")
+    log.info("采集器已关闭")
+    flush_logs()
+    files = list(tmp_path.glob("supere-ingestor-*.log"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "请检查 Windows" in text
+    assert "已连接" in text
+    assert "采集器开始关闭" in text
+    assert "采集器已关闭" in text
+    assert "\ufffd" not in text
+
+
+def test_spawn_detached_does_not_inherit_caller_pipes(tmp_path: Path, monkeypatch):
+    import subprocess
+    import sys
+
+    from supere.spawn import spawn_detached
+
+    captured: dict = {}
+
+    class _Proc:
+        pid = 43210
+
+    def fake_popen(**kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    pid = spawn_detached(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        stdout_path=tmp_path / "out.log",
+        stderr_path=tmp_path / "err.log",
+    )
+    assert pid == 43210
+    assert captured["close_fds"] is True
+    assert captured["stdin"] is subprocess.DEVNULL
+    if sys.platform == "win32":
+        flags = captured["creationflags"]
+        assert flags & 0x00000008  # DETACHED_PROCESS
+        assert flags & 0x00000200  # CREATE_NEW_PROCESS_GROUP
+    else:
+        assert captured["start_new_session"] is True
+
+
+def test_spawn_detached_returns_while_child_is_alive(tmp_path: Path):
+    import os
+    import signal
+    import sys
+    import time
+
+    from supere.spawn import spawn_detached
+
+    started = time.monotonic()
+    pid = spawn_detached(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        stdout_path=tmp_path / "out.log",
+        stderr_path=tmp_path / "err.log",
+    )
+    assert time.monotonic() - started < 5
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
 def test_smoke_labels_are_not_repeated():
     from supere.acceptance import Check
 
