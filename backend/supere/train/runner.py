@@ -115,6 +115,8 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
     exit_bar = lab.exit_bar[keep]
     entry = lab.entry[keep]
     exit_px = lab.exit_price[keep]
+    upper = lab.upper[keep]
+    lower = lab.lower[keep]
     amb = lab.ambiguous[keep]
     m = int(sample_bar.shape[0])
     if m < 50:
@@ -133,6 +135,7 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
     in_oos = np.zeros(m, dtype=bool)
     last_model = None
     fold_rows: list[dict] = []
+    first_train: np.ndarray | None = None
 
     for fold in splits.iter_folds(
         sample_bar,
@@ -150,6 +153,8 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
         except ValueError as exc:
             log.warning("第 %d 折跳过：%s", fold.number, exc)
             continue
+        if first_train is None:
+            first_train = fold.train
         oof[fold.test] = proba
         in_oos[fold.test] = True
         fold_acc = float(np.mean(CLASSES[np.argmax(proba, axis=1)] == y[fold.test]))
@@ -173,7 +178,8 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
     y_o = y[pos]
     first_pos = int(pos[0])
     cls = metrics.classification(y_o, proba_o)
-    base = metrics.baselines(y_o, y[:first_pos] if first_pos > 0 else y_o, X[pos, names.index("ret_1")])
+    prior_y = y[first_train] if first_train is not None else y_o
+    base = metrics.baselines(y_o, prior_y, X[pos, names.index("ret_1")])
 
     eff = len(pos) / max(cfg.label.horizon, 1)
     log.info("样本外 %d 个（约等于 %.0f 个有效独立样本，H=%d）", len(pos), eff, cfg.label.horizon)
@@ -187,7 +193,7 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
                  f"；log loss {value['log_loss']:.4f}" if "log_loss" in value else "")
 
     bt = _backtest_block(cfg, bars, funding, sample_bar[pos], exit_bar[pos], entry[pos],
-                         exit_px[pos], amb[pos], proba_o, X[pos, names.index("ret_1")], log)
+                         exit_px[pos], upper[pos], lower[pos], amb[pos], proba_o, X[pos, names.index("ret_1")], log)
 
     importance = model.importance_table(last_model, names) if last_model is not None else []
     if importance:
@@ -222,7 +228,7 @@ def run(cfg: TrainConfig, db_path: Path, log: logging.Logger) -> dict:
     return result
 
 
-def _backtest_block(cfg, bars, funding, sample_bar, exit_bar, entry, exit_px, amb, proba, ret1, log):
+def _backtest_block(cfg, bars, funding, sample_bar, exit_bar, entry, exit_px, upper, lower, amb, proba, ret1, log):
     interval_ms = bars.interval_ms
     out: dict = {"threshold": cfg.threshold, "scenarios": {}}
     n = int(sample_bar.shape[0])
@@ -238,6 +244,8 @@ def _backtest_block(cfg, bars, funding, sample_bar, exit_bar, entry, exit_px, am
                 exit_bar=exit_bar,
                 entry=entry,
                 exit_price=exit_px,
+                upper=upper,
+                lower=lower,
                 ambiguous=amb,
                 dirs=dirs,
                 open_time=bars.open_time,
@@ -249,31 +257,48 @@ def _backtest_block(cfg, bars, funding, sample_bar, exit_bar, entry, exit_px, am
             block[label] = backtest.summarize(trades, n)
         out["scenarios"][scen.name] = block
         mdl = block["model"]
-        log.info(
-            "回测 %-11s 模型：交易 %d（覆盖 %.1f%%）胜率 %.1f%% 期望 %.3f%% 盈亏比 %.2f 复利 %.2f%% 最大回撤 %.2f%% 最大连亏 %d",
-            scen.name, mdl["trades"], 100 * mdl["coverage"], 100 * _nz(mdl["hit_rate"]),
-            100 * _nz(mdl["expectancy"]), _nz(mdl["payoff_ratio"]), 100 * mdl["compounded"],
-            100 * mdl["max_drawdown"], mdl["max_consecutive_losses"],
-        )
+        if mdl["trades"] == 0:
+            log.info("回测 %-11s 模型：阈值 %.2f 下没有交易", scen.name, cfg.threshold)
+        else:
+            log.info(
+                "回测 %-11s 模型：交易 %d（覆盖 %.1f%%）胜率 %.1f%% 期望 %s 盈亏比 %s 复利 %.2f%% 最大回撤 %.2f%% 最大连亏 %d",
+                scen.name, mdl["trades"], 100 * mdl["coverage"], 100 * mdl["hit_rate"],
+                _pct(mdl["expectancy"]), _num(mdl["payoff_ratio"]), 100 * mdl["compounded"],
+                100 * mdl["max_drawdown"], mdl["max_consecutive_losses"],
+            )
         for name in ("always_long", "momentum"):
             b = block[name]
-            log.info("  基线 %-11s 交易 %d 期望 %.3f%%", name, b["trades"], 100 * _nz(b["expectancy"]))
+            log.info("  基线 %-11s 交易 %d 期望 %s", name, b["trades"], _pct(b["expectancy"]))
     return out
 
 
-def _nz(value) -> float:
-    return 0.0 if value is None or (isinstance(value, float) and np.isnan(value)) else float(value)
+def _pct(value) -> str:
+    return "n/a" if value is None or not np.isfinite(value) else f"{100 * value:.3f}%"
+
+
+def _num(value) -> str:
+    return "n/a" if value is None or not np.isfinite(value) else f"{value:.2f}"
 
 
 def _fmt(ms) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M")
 
 
+def _strict(obj):
+    if isinstance(obj, dict):
+        return {k: _strict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_strict(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if np.isfinite(obj) else None
+    return obj
+
+
 def write_result(result: dict, log_path: Path) -> Path:
-    """JSON next to the text log, same stem (``train-<stamp>.json``)."""
+    """JSON next to the text log, same stem. NaN becomes null (strict JSON)."""
     path = log_path.with_suffix(".json")
     path.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2, default=_json_default),
+        json.dumps(_strict(result), ensure_ascii=False, indent=2, default=_json_default, allow_nan=False),
         encoding="utf-8",
     )
     return path

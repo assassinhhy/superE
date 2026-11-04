@@ -26,6 +26,8 @@ def _one_trade(**kw):
         exit_bar=np.array([7]),
         entry=np.array([100.0]),
         exit_price=np.array([102.0]),
+        upper=np.array([102.0]),
+        lower=np.array([98.0]),
         ambiguous=np.array([False]),
         dirs=np.array([1]),
         open_time=T0 + np.arange(20, dtype=np.int64) * INTERVAL_MS,
@@ -80,6 +82,8 @@ def test_only_one_position_at_a_time():
         exit_bar=np.array([9, 8, 11]),
         entry=np.array([100.0, 100.0, 100.0]),
         exit_price=np.array([101.0, 101.0, 101.0]),
+        upper=np.array([101.0, 101.0, 101.0]),
+        lower=np.array([99.0, 99.0, 99.0]),
         ambiguous=np.zeros(3, dtype=bool),
         dirs=np.array([1, 1, 1]),
         open_time=T0 + np.arange(20, dtype=np.int64) * INTERVAL_MS,
@@ -186,3 +190,14 @@ def test_training_connection_cannot_write(tmp_path: Path):
 def test_missing_database_is_a_clear_error(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         open_readonly(tmp_path / "nope.sqlite")
+
+
+def test_ambiguous_bar_takes_the_adverse_fill_for_each_side():
+    # Entry 100, barriers 102 / 98, both touched in one bar.
+    # A long exits at the lower barrier (-2%); a short exits at the upper one (-2%).
+    amb = dict(ambiguous=np.array([True]), exit_price=np.array([98.0]),
+               upper=np.array([102.0]), lower=np.array([98.0]))
+    (long_t,) = _one_trade(dirs=np.array([1]), **amb)
+    (short_t,) = _one_trade(dirs=np.array([-1]), **amb)
+    assert long_t["gross"] == pytest.approx(-0.02)
+    assert short_t["gross"] == pytest.approx(-0.02)

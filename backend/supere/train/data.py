@@ -149,6 +149,10 @@ def load_bars(
         trades=f64(7),
         taker_buy_base=f64(8),
     )
+    for name in ("o", "h", "l", "c", "volume"):
+        bad = int(np.sum(~np.isfinite(getattr(bars, name))))
+        if bad:
+            raise ValueError(f"{interval} 的 {name} 有 {bad} 个非有限值（空或 inf），库可能损坏")
     if bars.n >= 2 and np.any(np.diff(bars.open_time) <= 0):
         raise ValueError("open_time 没有严格递增，库可能损坏")
     return bars
@@ -166,14 +170,18 @@ def gap_after(bars: Bars) -> np.ndarray:
     return np.concatenate([gaps, [False]])
 
 
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return row is not None
+
+
 def load_funding(conn: sqlite3.Connection, symbol: str) -> Funding:
-    try:
-        rows = conn.execute(
-            "SELECT funding_time, rate FROM funding WHERE symbol = ? ORDER BY funding_time",
-            (symbol,),
-        ).fetchall()
-    except sqlite3.OperationalError:
+    if not _has_table(conn, "funding"):
         return Funding.empty()
+    rows = conn.execute(
+        "SELECT funding_time, rate FROM funding WHERE symbol = ? ORDER BY funding_time",
+        (symbol,),
+    ).fetchall()
     if not rows:
         return Funding.empty()
     return Funding(
@@ -183,16 +191,15 @@ def load_funding(conn: sqlite3.Connection, symbol: str) -> Funding:
 
 
 def load_metrics(conn: sqlite3.Connection, symbol: str) -> Metrics:
-    try:
-        rows = conn.execute(
-            """
-            SELECT ts, oi, top_pos_lsr, top_acc_lsr, global_lsr, taker_lsr
-            FROM um_metrics WHERE symbol = ? ORDER BY ts
-            """,
-            (symbol,),
-        ).fetchall()
-    except sqlite3.OperationalError:
+    if not _has_table(conn, "um_metrics"):
         return Metrics.empty()
+    rows = conn.execute(
+        """
+        SELECT ts, oi, top_pos_lsr, top_acc_lsr, global_lsr, taker_lsr
+        FROM um_metrics WHERE symbol = ? ORDER BY ts
+        """,
+        (symbol,),
+    ).fetchall()
     if not rows:
         return Metrics.empty()
     cols = list(zip(*rows, strict=True))

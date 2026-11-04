@@ -59,6 +59,8 @@ def simulate(
     exit_bar: np.ndarray,
     entry: np.ndarray,  # open of bar i+1
     exit_price: np.ndarray,
+    upper: np.ndarray,
+    lower: np.ndarray,
     ambiguous: np.ndarray,
     dirs: np.ndarray,
     open_time: np.ndarray,
@@ -78,7 +80,11 @@ def simulate(
             continue
         ex = int(exit_bar[p])
         px_in = float(entry[p])
-        px_out = float(exit_price[p])
+        if ambiguous[p]:
+            # Both barriers touched in one bar: the adverse fill for this side.
+            px_out = float(lower[p]) if d > 0 else float(upper[p])
+        else:
+            px_out = float(exit_price[p])
 
         gross = d * (px_out - px_in) / px_in
         fees = scenario.entry_fee + scenario.exit_fee

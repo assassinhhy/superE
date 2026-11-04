@@ -95,7 +95,11 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.data_dir).resolve() if args.data_dir else data_dir(app_cfg, cfg_path)
     train_path = Path(args.train_config) if args.train_config else cfg_path.parent / "train.toml"
-    file_values = tcfg.load_file(train_path)
+    try:
+        file_values = tcfg.load_file(train_path, required=bool(args.train_config))
+    except tcfg.ConfigError as exc:
+        print(f"训练配置错误：{exc}", file=sys.stderr)
+        return 2
     # The symbol comes from config.toml unless train.toml names one.
     file_values.setdefault("train", {}).setdefault("symbol", app_cfg.symbols.um)
 

@@ -105,11 +105,17 @@ def default_for(interval: str) -> TrainConfig:
     return TrainConfig(interval=interval, label=LabelConfig(horizon=horizon, k_atr=k))
 
 
-def load_file(path: Path | None) -> dict:
+def load_file(path: Path | None, *, required: bool = False) -> dict:
+    """Read train.toml. A missing file is fine unless ``required``."""
     if path is None or not Path(path).exists():
+        if required:
+            raise ConfigError(f"找不到训练配置 {path}")
         return {}
-    with open(path, "rb") as fh:
-        return tomllib.load(fh)
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"train.toml 解析失败：{exc}") from exc
 
 
 def build(

@@ -31,6 +31,8 @@ class Labels:
     exit_bar: np.ndarray  # bar index whose close ends the label
     entry: np.ndarray  # open of bar idx+1
     exit_price: np.ndarray  # barrier price, or close at horizon
+    upper: np.ndarray  # upper barrier (adverse fill for a short on ambiguous bars)
+    lower: np.ndarray  # lower barrier (adverse fill for a long on ambiguous bars)
     ambiguous: np.ndarray  # bool
     fwd_logret: np.ndarray  # log(close at horizon / entry), auxiliary target
 
@@ -52,6 +54,8 @@ def build(bars: Bars, horizon: int, k_atr: float, atr_period: int = 14) -> Label
     exit_price: list[float] = []
     amb: list[bool] = []
     fwd: list[float] = []
+    ups: list[float] = []
+    dns: list[float] = []
 
     for i in range(n - horizon):
         width = a[i]
@@ -85,6 +89,8 @@ def build(bars: Bars, horizon: int, k_atr: float, atr_period: int = 14) -> Label
         exit_bar.append(ex_bar)
         entry.append(px)
         exit_price.append(ex_px)
+        ups.append(up)
+        dns.append(dn)
         amb.append(was_amb)
         fwd.append(float(np.log(bars.c[last] / px)))
 
@@ -96,6 +102,8 @@ def build(bars: Bars, horizon: int, k_atr: float, atr_period: int = 14) -> Label
         exit_price=np.asarray(exit_price, dtype=np.float64),
         ambiguous=np.asarray(amb, dtype=bool),
         fwd_logret=np.asarray(fwd, dtype=np.float64),
+        upper=np.asarray(ups, dtype=np.float64),
+        lower=np.asarray(dns, dtype=np.float64),
     )
 
 
