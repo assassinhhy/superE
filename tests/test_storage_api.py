@@ -410,7 +410,8 @@ def test_spawn_detached_returns_while_child_is_alive(tmp_path: Path):
     )
     assert time.monotonic() - started < 5
     try:
-        os.kill(pid, signal.SIGKILL)
+        # Windows 没有 SIGKILL；os.kill 在那里等同于 TerminateProcess。
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except ProcessLookupError:
         return
     try:
