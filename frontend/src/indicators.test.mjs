@@ -5,6 +5,7 @@ import {
   INTERVALS,
   MA_LINES,
   PREDICT_INTERVALS,
+  appendOlderPage,
   chartBodyHeight,
   asofSeries,
   atr,
@@ -140,6 +141,21 @@ test("MA15 and MA25 are separate overlays, and the old periods are gone", () => 
   assert.equal(on.has("MA25"), true);
   on = toggleMember(on, "MA25");
   assert.equal(on.has("MA15") || on.has("MA25"), false);
+});
+
+test("metrics paging stops when the server ignores end and repeats the latest page", () => {
+  const latest = [{ ts: 300 }, { ts: 200 }, { ts: 100 }];
+  const first = appendOlderPage([], latest, "ts");
+  assert.equal(first.grew, true);
+  assert.equal(first.cursor, 99);
+  const repeated = appendOlderPage(first.rows, latest, "ts");
+  assert.equal(repeated.grew, false);
+  assert.equal(repeated.cursor, null);
+  assert.equal(repeated.rows.length, 3);
+  const older = appendOlderPage(first.rows, [{ ts: 50 }, { ts: 40 }], "ts");
+  assert.equal(older.grew, true);
+  assert.equal(older.cursor, 39);
+  assert.equal(older.rows.length, 5);
 });
 
 test("six sub panes keep a full main pane instead of splitting the viewport", () => {

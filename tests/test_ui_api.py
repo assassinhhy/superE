@@ -19,6 +19,24 @@ from supere.storage.duck import DuckReader
 from supere.storage.parquet_store import ParquetStore
 
 
+def test_metrics_and_funding_accept_the_chart_page_size(db: Database):
+    from supere.storage.models import FundingRow, MetricRow
+
+    db.upsert_metrics(
+        [MetricRow(symbol="ETHUSDT", ts=1_700_000_000_000, oi="123", global_lsr="1.2", source="test")]
+    )
+    db.upsert_funding([FundingRow("ETHUSDT", 1_700_000_000_000, "0.0001", "3500", "test")])
+    app = create_app(AppConfig(), DataAccess(db), LiveHub(), connect_ipc=False)
+    with TestClient(app) as client:
+        metrics = client.get("/api/metrics", params={"symbol": "ETHUSDT", "limit": 1000})
+        funding = client.get("/api/funding", params={"symbol": "ETHUSDT", "limit": 1000})
+    assert metrics.status_code == 200
+    assert metrics.json()["rows"][0]["oi"] == "123"
+    assert metrics.json()["rows"][0]["global_lsr"] == "1.2"
+    assert funding.status_code == 200
+    assert funding.json()["settled"][0]["rate"] == "0.0001"
+
+
 def test_origin_stays_on_loopback():
     assert origin_of(AppConfig()) == "http://127.0.0.1:8766"
 

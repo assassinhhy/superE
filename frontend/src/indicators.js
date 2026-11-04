@@ -54,6 +54,34 @@ export function toggleMember(enabled, id) {
   return next;
 }
 
+/** Live 1a API rejects limit above 1000. Pages walk backward with `end` when the server honors it. */
+export const SERIES_PAGE = 1000;
+
+export function appendOlderPage(collected, page, timeKey) {
+  const times = [];
+  for (const row of page || []) {
+    const stamp = Number(row?.[timeKey]);
+    if (Number.isFinite(stamp)) times.push(stamp);
+  }
+  if (!times.length) return { rows: collected, cursor: null, grew: false };
+  const min = Math.min(...times);
+  let prevMin = Infinity;
+  for (const row of collected) {
+    const stamp = Number(row?.[timeKey]);
+    if (Number.isFinite(stamp)) prevMin = Math.min(prevMin, stamp);
+  }
+  if (min >= prevMin) return { rows: collected, cursor: null, grew: false };
+  const seen = new Set(collected.map((row) => Number(row?.[timeKey])));
+  const rows = collected.slice();
+  for (const row of page) {
+    const stamp = Number(row?.[timeKey]);
+    if (!Number.isFinite(stamp) || seen.has(stamp)) continue;
+    seen.add(stamp);
+    rows.push(row);
+  }
+  return { rows, cursor: min - 1, grew: true };
+}
+
 const ACTIVE_FILL = new Set(["GAP_FILL", "BACKFILL"]);
 
 export function formatUtc8(ms) {

@@ -1,12 +1,13 @@
 <script setup>
 import { dispose, init, registerIndicator } from "klinecharts";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { api } from "../api.js";
+import { api, loadOlderSeries } from "../api.js";
 import { state } from "../live.js";
 import {
   INTERVALS,
   MAIN_PANE_PX,
   MA_LINES,
+  SERIES_PAGE,
   SUB_PANE_PX,
   atr,
   chartBodyHeight,
@@ -109,9 +110,23 @@ async function decorate(rawBars) {
   const start = bars[0].timestamp - 86_400_000;
   const end = bars[bars.length - 1].closeTime;
   const liqStart = Math.max(start, end - 14 * 86_400_000);
-  const [metrics, funding, spot, premium, liq] = await Promise.all([
-    api.metrics({ symbol: "ETHUSDT", start, end, limit: 5000 }).catch(() => ({ rows: [] })),
-    api.funding({ symbol: "ETHUSDT", start, end, limit: 2000 }).catch(() => ({ settled: [] })),
+  const [metricRows, fundingRows, spot, premium, liq] = await Promise.all([
+    loadOlderSeries(
+      (cursor) =>
+        api
+          .metrics({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor })
+          .then((body) => body.rows || []),
+      "ts",
+      start,
+    ).catch(() => []),
+    loadOlderSeries(
+      (cursor) =>
+        api
+          .funding({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor })
+          .then((body) => body.settled || []),
+      "funding_time",
+      start,
+    ).catch(() => []),
     props.market === "um"
       ? api.klines({ market: "spot", symbol: "ETHUSDT", interval: "1m", start, end, limit: 1500 }).catch(() => ({ bars: [] }))
       : Promise.resolve({ bars: [] }),
@@ -121,8 +136,8 @@ async function decorate(rawBars) {
     api.liquidations({ symbol: "ETHUSDT", start: liqStart, end }).catch(() => ({ rows: [] })),
   ]);
   return joinBarExtras(bars, {
-    metrics: metrics.rows,
-    funding: funding.settled,
+    metrics: metricRows,
+    funding: fundingRows,
     spot: spot.bars,
     premium: premium.bars,
     liquidations: liq.rows,

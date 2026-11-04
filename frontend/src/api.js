@@ -1,3 +1,5 @@
+import { SERIES_PAGE, appendOlderPage } from "./indicators.js";
+
 async function getJSON(path) {
   const response = await fetch(path);
   if (!response.ok) {
@@ -12,6 +14,21 @@ function query(params) {
     if (value != null && value !== "") search.set(key, String(value));
   }
   return search.toString();
+}
+
+export async function loadOlderSeries(fetchPage, timeKey, until) {
+  let rows = [];
+  let end;
+  for (let page = 0; page < 8; page += 1) {
+    const batch = await fetchPage(end);
+    const next = appendOlderPage(rows, batch, timeKey);
+    rows = next.rows;
+    if (!next.grew || next.cursor == null) break;
+    if (batch.length < SERIES_PAGE) break;
+    if (until != null && next.cursor <= until) break;
+    end = next.cursor;
+  }
+  return rows;
 }
 
 export const api = {
