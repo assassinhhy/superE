@@ -69,7 +69,13 @@ a { color: var(--brass); }
   font-size: 0.82rem;
 }
 .toolrow .split { color: var(--muted); margin-left: 0.4rem; }
-.chart-host { flex: 1; min-height: 280px; background: var(--bg); }
+.chart-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.chart-host { width: 100%; min-height: 100%; background: var(--bg); }
 .chart-note { margin: 0.4rem 0.7rem; color: var(--warn); }
 
 .side {

@@ -5,15 +5,16 @@ import { api } from "../api.js";
 import { state } from "../live.js";
 import {
   INTERVALS,
+  MAIN_PANE_PX,
   MA_LINES,
+  SUB_PANE_PX,
   atr,
-  cvd,
+  chartBodyHeight,
   joinBarExtras,
   maCreate,
   paintDelay,
   toBar,
   toggleMember,
-  vwap,
 } from "../indicators.js";
 
 const props = defineProps({
@@ -21,9 +22,10 @@ const props = defineProps({
   interval: { type: String, required: true },
 });
 
+const scrollEl = ref(null);
 const host = ref(null);
 const message = ref("");
-const enabled = ref(new Set([...MA_LINES.map((line) => line.id), "VWAP", "VOL", "ATR"]));
+const enabled = ref(new Set(["BOLL", "MACD", "ATR", "OI", "FUNDING", "LSR", "TAKER"]));
 let chart = null;
 let pushBar = null;
 let pending = [];
@@ -34,26 +36,15 @@ let resizeObserver = null;
 
 const MAIN = [
   ...MA_LINES.map((line) => ({ id: line.id, label: line.id, ma: line })),
-  { id: "EMA", label: "EMA" },
   { id: "BOLL", label: "BOLL" },
-  { id: "SAR", label: "SAR" },
-  { id: "VWAP", label: "VWAP" },
 ];
 const SUB = [
-  { id: "VOL", label: "VOL" },
   { id: "MACD", label: "MACD" },
-  { id: "RSI", label: "RSI" },
-  { id: "KDJ", label: "KDJ" },
   { id: "ATR", label: "ATR" },
-  { id: "OBV", label: "OBV" },
-  { id: "CVD", label: "CVD" },
   { id: "OI", label: "OI" },
   { id: "FUNDING", label: "资金费率" },
   { id: "LSR", label: "多空比" },
   { id: "TAKER", label: "主动买卖比" },
-  { id: "BASIS", label: "基差" },
-  { id: "PREMIUM", label: "溢价" },
-  { id: "LIQ", label: "清算" },
 ];
 const TOOLS = [
   { id: "segment", label: "线段" },
@@ -64,16 +55,11 @@ const TOOLS = [
 ];
 
 const NAMES = {
-  VWAP: "SUPERE_VWAP",
   ATR: "SUPERE_ATR",
-  CVD: "SUPERE_CVD",
   OI: "SUPERE_OI",
   FUNDING: "SUPERE_FUNDING",
   LSR: "SUPERE_LSR",
   TAKER: "SUPERE_TAKER",
-  BASIS: "SUPERE_BASIS",
-  PREMIUM: "SUPERE_PREMIUM",
-  LIQ: "SUPERE_LIQ",
 };
 
 let registered = false;
@@ -91,16 +77,10 @@ function registerCustom() {
       calc,
     });
   };
-  line("SUPERE_VWAP", "VWAP", "vwap", "VWAP: ", "price", 2, (data) =>
-    vwap(data).map((value) => ({ vwap: value })),
-  );
   line("SUPERE_ATR", "ATR", "atr", "ATR: ", "normal", 2, (data, indicator) => {
     const period = Number(indicator.calcParams?.[0] || 14);
     return atr(data, period).map((value) => ({ atr: value }));
   });
-  line("SUPERE_CVD", "CVD", "cvd", "CVD: ", "normal", 3, (data) =>
-    cvd(data).map((value) => ({ cvd: value })),
-  );
   line("SUPERE_OI", "OI", "oi", "OI: ", "normal", 0, (data) => data.map((bar) => ({ oi: bar.oi ?? null })));
   line("SUPERE_FUNDING", "资金费率", "funding", "费率: ", "normal", 6, (data) =>
     data.map((bar) => ({ funding: bar.funding ?? null })),
@@ -112,15 +92,6 @@ function registerCustom() {
     data.map((bar) => ({
       taker: bar.volume ? bar.takerBuy / bar.volume : null,
     })),
-  );
-  line("SUPERE_BASIS", "基差", "basis", "基差: ", "normal", 2, (data) =>
-    data.map((bar) => ({ basis: bar.basis ?? null })),
-  );
-  line("SUPERE_PREMIUM", "溢价", "premium", "溢价: ", "normal", 6, (data) =>
-    data.map((bar) => ({ premium: bar.premium ?? null })),
-  );
-  line("SUPERE_LIQ", "清算", "liq", "清算额: ", "normal", 0, (data) =>
-    data.map((bar) => ({ liq: bar.liq ?? null })),
   );
 }
 
@@ -253,11 +224,27 @@ function mountIndicators() {
   for (const id of enabled.value) showIndicator(id);
 }
 
+function subCount() {
+  return [...enabled.value].filter((id) => SUB.some((item) => item.id === id)).length;
+}
+
+function reflow() {
+  if (!chart || !host.value || !scrollEl.value) return;
+  const sep = Number(chart.getStyles()?.separator?.size) || 1;
+  const needed = chartBodyHeight(subCount(), { separator: sep, axis: 36 });
+  const viewport = scrollEl.value.clientHeight || 0;
+  const next = Math.max(needed, viewport);
+  if (Math.abs(host.value.getBoundingClientRect().height - next) < 2) return;
+  host.value.style.height = `${next}px`;
+  chart.resize();
+}
+
 function toggle(id) {
   const next = toggleMember(enabled.value, id);
   if (next.has(id)) showIndicator(id);
   else hideIndicator(id);
   enabled.value = next;
+  reflow();
 }
 
 function draw(name) {
@@ -288,7 +275,9 @@ onMounted(() => {
   chart = init(host.value, {
     locale: "zh-CN",
     timezone: "Asia/Shanghai",
-    layout: { pane: { dragEnabled: true } },
+    layout: {
+      pane: { dragEnabled: true, minHeight: SUB_PANE_PX, height: SUB_PANE_PX },
+    },
     styles: {
       grid: {
         horizontal: { color: "#2a3124" },
@@ -333,10 +322,12 @@ onMounted(() => {
     volumePrecision: 3,
   });
   chart.setPeriod({ span: period.span, type: period.type });
+  chart.setPaneOptions({ id: "candle_pane", minHeight: MAIN_PANE_PX });
   mountIndicators();
   chart.setDataLoader(loader());
-  resizeObserver = new ResizeObserver(() => chart.resize());
-  resizeObserver.observe(host.value);
+  reflow();
+  resizeObserver = new ResizeObserver(() => reflow());
+  resizeObserver.observe(scrollEl.value);
 });
 
 watch(() => props.interval, (id) => {
@@ -394,6 +385,8 @@ onBeforeUnmount(() => {
       <button type="button" @click="clearDrawings">清除</button>
     </div>
     <p v-if="message" class="chart-note">{{ message }}</p>
-    <div ref="host" class="chart-host"></div>
+    <div ref="scrollEl" class="chart-scroll">
+      <div ref="host" class="chart-host"></div>
+    </div>
   </div>
 </template>

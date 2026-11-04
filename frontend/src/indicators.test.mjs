@@ -5,6 +5,7 @@ import {
   INTERVALS,
   MA_LINES,
   PREDICT_INTERVALS,
+  chartBodyHeight,
   asofSeries,
   atr,
   basisSeries,
@@ -126,27 +127,24 @@ test("redraw throttle waits out the remainder of 250ms", () => {
   assert.equal(paintDelay(1100, 800), 0);
 });
 
-test("each MA period is its own indicator, so MA10 and MA60 toggle separately", () => {
-  const byId = Object.fromEntries(MA_LINES.map((line) => [line.id, line]));
-  const ma10 = maCreate(byId.MA10);
-  const ma60 = maCreate(byId.MA60);
-  assert.deepEqual(ma10.calcParams, [10]);
-  assert.deepEqual(ma60.calcParams, [60]);
-  assert.equal(ma10.id, "MA10");
-  assert.equal(ma60.id, "MA60");
-  assert.notEqual(ma10.styles.lines[0].color, ma60.styles.lines[0].color);
+test("MA15 and MA25 are separate overlays, and the old periods are gone", () => {
+  assert.deepEqual(MA_LINES.map((line) => line.period), [15, 25]);
+  const ma15 = maCreate(MA_LINES[0]);
+  const ma25 = maCreate(MA_LINES[1]);
+  assert.deepEqual(ma15.calcParams, [15]);
+  assert.deepEqual(ma25.calcParams, [25]);
+  assert.notEqual(ma15.id, ma25.id);
+  let on = new Set(["MA15", "MA25"]);
+  on = toggleMember(on, "MA15");
+  assert.equal(on.has("MA15"), false);
+  assert.equal(on.has("MA25"), true);
+  on = toggleMember(on, "MA25");
+  assert.equal(on.has("MA15") || on.has("MA25"), false);
+});
 
-  let on = new Set(MA_LINES.map((line) => line.id));
-  on = toggleMember(on, "MA10");
-  assert.equal(on.has("MA10"), false);
-  assert.equal(on.has("MA60"), true);
-  assert.equal(on.has("MA5"), true);
-  on = toggleMember(on, "MA60");
-  assert.equal(on.has("MA60"), false);
-  on = toggleMember(on, "MA10");
-  on = toggleMember(on, "MA60");
-  assert.equal(on.has("MA10") && on.has("MA60"), true);
-  on = toggleMember(on, "MA10");
-  on = toggleMember(on, "MA60");
-  assert.equal(on.has("MA10") || on.has("MA60"), false);
+test("six sub panes keep a full main pane instead of splitting the viewport", () => {
+  const viewport = 720;
+  const body = chartBodyHeight(6);
+  assert.ok(body > viewport);
+  assert.ok(body - 6 * 156 >= 340);
 });

@@ -20,13 +20,20 @@ export const INTERVALS = [
 
 export const PREDICT_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w", "1M"];
 
-/** Built-in KLineChart MA draws 5/10/30/60 as one indicator. Each entry is its own instance. */
+/** Each period is its own main-pane instance. KLineChart's built-in MA would draw them as one indicator. */
 export const MA_LINES = [
-  { id: "MA5", period: 5, color: "#FF9600" },
-  { id: "MA10", period: 10, color: "#935EBD" },
-  { id: "MA30", period: 30, color: "#1677FF" },
-  { id: "MA60", period: 60, color: "#E11D74" },
+  { id: "MA15", period: 15, color: "#FF9600" },
+  { id: "MA25", period: 25, color: "#935EBD" },
 ];
+
+/** Sub panes keep this height. The chart body grows and the pane scrolls instead of crushing them. */
+export const SUB_PANE_PX = 156;
+export const MAIN_PANE_PX = 340;
+
+export function chartBodyHeight(subCount, { separator = 1, axis = 36 } = {}) {
+  const subs = Math.max(0, subCount);
+  return MAIN_PANE_PX + subs * SUB_PANE_PX + subs * separator + axis;
+}
 
 export function maCreate(line) {
   return {
