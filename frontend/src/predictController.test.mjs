@@ -62,6 +62,22 @@ test("concurrent clicks are guarded against re-entry", async () => {
   assert.equal(controller.state.predicting, false);
 });
 
+test("a failed news fetch during a click keeps the cached news panel", async () => {
+  const api = fakeApi();
+  const controller = createPredictController({ api, intervals: ["1h"] });
+  await controller.loadCachedNews();
+  const cached = controller.state.news;
+  api.predictOnClick = async () => ({
+    items: [],
+    news: { items: [], status: "error", message: "新闻超时", alert: null, sources: {} },
+    click_at_utc8: "2026-11-05 20:31",
+  });
+  await controller.run();
+  assert.equal(controller.state.news, cached);
+  assert.equal(controller.state.news.items[0].id, 1);
+  assert.match(controller.state.newsError, /新闻超时/);
+});
+
 test("a failed click keeps the previous rows and shows an error", async () => {
   const api = fakeApi();
   const controller = createPredictController({ api, intervals: ["1h"] });

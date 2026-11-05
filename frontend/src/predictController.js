@@ -56,14 +56,27 @@ export function createPredictController({ api, intervals, onChange } = {}) {
     try {
       const payload = await api.predictOnClick();
       const items = payload?.items || [];
-      const predictions = Object.fromEntries(items.map((item) => [item.interval, item]));
-      const nextNews = payload?.news ? newsState(payload.news) : state.news;
+      const predictions = items.length
+        ? Object.fromEntries(items.map((item) => [item.interval, item]))
+        : state.predictions;
+      // A failed news fetch must not wipe the cached panel; keep it and show a note.
+      let nextNews = state.news;
+      let newsError = state.newsError;
+      if (payload?.news) {
+        const failed = payload.news.status === "error" && !(payload.news.items || []).length;
+        if (failed) {
+          newsError = payload.news.message || "新闻抓取失败，已保留缓存";
+        } else {
+          nextNews = newsState(payload.news);
+          newsError = "";
+        }
+      }
       update({
         predictions,
         news: nextNews,
         clickAt: payload?.click_at_utc8 || "",
         hasRun: true,
-        newsError: "",
+        newsError,
       });
       return payload;
     } catch (err) {
