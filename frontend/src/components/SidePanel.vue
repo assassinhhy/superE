@@ -5,6 +5,7 @@ import { api } from "../api.js";
 import { PREDICT_INTERVALS, formatUtc8, formatUtc8Clock } from "../indicators.js";
 import { formatLevels } from "../predictLevels.js";
 import { buildNarrative } from "../predictNarrative.js";
+import { tradableBadge } from "../tradableBadge.js";
 
 const props = defineProps({
   market: { type: String, required: true },
@@ -114,6 +115,7 @@ const signalRows = computed(() =>
       tip,
       levels: formatLevels(p),
       top: explainBlock(p),
+      badge: tradableBadge(p),
     };
   }),
 );
@@ -198,7 +200,11 @@ const kinds = {
               <td>{{ row.interval }}</td>
               <td :class="row.dirClass">{{ row.dirText }}</td>
               <td>{{ row.probText }}</td>
-              <td>{{ row.stateText }}</td>
+              <td>
+                {{ row.stateText }}
+                <span v-if="row.badge" class="tradable-badge" :title="row.badge.reason || row.badge.text">{{ row.badge.text }}</span>
+                <small v-if="row.badge && row.badge.reason" class="tradable-reason">{{ row.badge.reason }}</small>
+              </td>
             </tr>
             <tr v-if="row.levels || row.top" class="explain-row">
               <td colspan="4">
