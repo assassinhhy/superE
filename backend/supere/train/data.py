@@ -118,15 +118,22 @@ def load_bars(
     symbol: str,
     interval: str,
     limit_bars: int | None = None,
+    close_by_ms: int | None = None,
 ) -> Bars:
+    """``close_by_ms``: keep only bars whose close is at or before this time (a frozen snapshot)."""
     cols_sql = "SELECT open_time, o, h, l, c, volume, quote_volume, trades, taker_buy_base FROM klines"
+    where = "market = ? AND symbol = ? AND interval = ?"
+    args: list = [market, symbol, interval]
+    if close_by_ms is not None:
+        where += " AND open_time + ? <= ?"
+        args += [INTERVAL_MS[interval], int(close_by_ms)]
     if limit_bars is not None:
         # Newest rows only, so a short window does not read the whole history.
-        sql = cols_sql + " WHERE market = ? AND symbol = ? AND interval = ? ORDER BY open_time DESC LIMIT ?"
-        rows = conn.execute(sql, (market, symbol, interval, limit_bars + WARMUP_BARS)).fetchall()[::-1]
+        sql = cols_sql + f" WHERE {where} ORDER BY open_time DESC LIMIT ?"
+        rows = conn.execute(sql, (*args, limit_bars + WARMUP_BARS)).fetchall()[::-1]
     else:
-        sql = cols_sql + " WHERE market = ? AND symbol = ? AND interval = ? ORDER BY open_time"
-        rows = conn.execute(sql, (market, symbol, interval)).fetchall()
+        sql = cols_sql + f" WHERE {where} ORDER BY open_time"
+        rows = conn.execute(sql, tuple(args)).fetchall()
     if not rows:
         raise ValueError(f"库里没有 {market} {symbol} {interval} 的 K 线")
 

@@ -176,8 +176,23 @@ def _num(x) -> float | None:
     return x if np.isfinite(x) else None
 
 
+NOT_TRADABLE_REASON = ("2026-11-05 训练口径迭代未达标（扣费后期望或折间稳定性不够），"
+                       "此模型仅供参考，不要据此下单")
+
+
 def _base(interval: str) -> dict:
-    return {"interval": interval, "debug": True, "debug_note": DEBUG_NOTE}
+    # Every item says whether the model is tradable. Default: not tradable, until a
+    # model whose meta.json has tradable=true (written only after the iteration passed) is served.
+    return {"interval": interval, "debug": True, "debug_note": DEBUG_NOTE,
+            "tradable": False, "tradable_status": "未达标/仅参考",
+            "tradable_reason": NOT_TRADABLE_REASON}
+
+
+def _tradable_fields(meta: dict) -> dict:
+    ok = meta.get("tradable") is True
+    return {"tradable": ok,
+            "tradable_status": "可用（已达标）" if ok else "未达标/仅参考",
+            "tradable_reason": meta.get("tradable_reason") or ("" if ok else NOT_TRADABLE_REASON)}
 
 
 def _fmt(ms: int) -> str:
@@ -267,6 +282,7 @@ class PredictService:
             levels, levels_reason = trade_levels(dir_now, got.ref_close, got.atr, float(art.meta["k_atr"]))
         return {
             **_base(interval),
+            **_tradable_fields(art.meta),
             "status": status,
             "direction": dir_now,
             "levels": levels,
