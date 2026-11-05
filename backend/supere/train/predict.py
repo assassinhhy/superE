@@ -353,3 +353,131 @@ _REASON = {
     "gap": "最近的 K 线有缺口，特征不可靠",
     "no_features": "核心特征还不完整（历史不够长）",
 }
+
+import time as _t
+
+class QuantilePredictService:
+    def __init__(self, data_root, *, bar_limit=1500, clock=None):
+        from pathlib import Path
+        self.data_root = Path(data_root)
+        self.db_path = self.data_root / "superE.sqlite"
+        self.bar_limit = bar_limit
+        self._clock = clock or _t.time
+        self._cache = {}
+
+    def _artifact(self, interval):
+        import supere.train.quantile as q
+        if interval in self._cache:
+            return self._cache[interval]
+        art = q.load_quantile(self.data_root, interval)
+        self._cache[interval] = art
+        return art
+
+    def predict(self, interval):
+        import math
+        import numpy as np
+        from supere.intervals import INTERVAL_MS
+        from supere.timeutil import UTC8
+        import supere.train.quantile as q
+        import supere.train.data as data
+        PRODUCT = q.PRODUCT_INTERVALS
+        if interval not in PRODUCT:
+            return {"interval": interval, "debug": True, "status": "bad_interval",
+                    "message": f"不支持的周期 {interval}", "price_forecast": None}
+        art = self._artifact(interval)
+        if art is None:
+            return {"interval": interval, "debug": True, "status": "no_model",
+                    "message": "这个周期还没有训练好的模型", "price_forecast": None}
+        if not self.db_path.exists():
+            return {"interval": interval, "debug": True, "status": "no_data",
+                    "message": f"找不到数据库 {self.db_path}", "price_forecast": None}
+        cfg = art.meta["config"]
+        now_ms = int(self._clock() * 1000)
+        try:
+            conn = data.open_readonly(self.db_path)
+            try:
+                bars = data.load_bars(conn, cfg["market"], cfg["symbol"], interval, self.bar_limit)
+                funding = data.load_funding(conn, cfg["symbol"])
+                metrics_in = data.load_metrics(conn, cfg["symbol"])
+                mark = data.load_bars(conn, "um_mark", cfg["symbol"], interval, self.bar_limit)
+                index = data.load_bars(conn, "um_index", cfg["symbol"], interval, self.bar_limit)
+                premium = data.load_bars(conn, "um_premium", cfg["symbol"], interval, self.bar_limit)
+            finally:
+                conn.close()
+            htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(interval)
+            higher = None
+            if htf_interval:
+                conn = data.open_readonly(self.db_path)
+                try:
+                    higher = data.load_bars(conn, "um", cfg["symbol"], htf_interval, None)
+                finally:
+                    conn.close()
+            n_closed = int(np.searchsorted(bars.close_time, now_ms, side="right"))
+            if n_closed == 0:
+                return {"interval": interval, "debug": True, "status": "no_bars",
+                        "message": "库里还没有这个周期的已收盘 K 线", "price_forecast": None}
+            closed = bars.slice_to(n_closed)
+            last = n_closed - 1
+            names, X, sig, r1 = q.build_features(
+                closed, funding if cfg.get("use_funding") else None,
+                metrics_in if cfg.get("use_metrics") else None, q.default_config(interval, cfg),
+                mark, index, premium, higher)
+            if names != art.names:
+                raise q.QuantileError(f"{interval} 的特征列表和当前代码不一致，需要重新训练")
+            row = X[last]
+            ci = q.core_index(names)
+            if not np.all(np.isfinite(row[ci])):
+                return {"interval": interval, "debug": True, "status": "no_features",
+                        "message": "核心特征还不完整（历史不够长）", "price_forecast": None}
+            Q = q.predict_raw(art.boosters, row.reshape(1, -1))
+            if cfg.get("target") == "vol":
+                Q = Q * float(sig[last])
+            Q = q.sort_rows(Q)
+            ref_close = float(closed.c[last])
+            decision_ms = int(bars.close_time[last])
+            top = q._quantile_explain(art.boosters[2], art.names, row, 3) if hasattr(q, "_quantile_explain") else []
+            CN = getattr(q, "CN_LABEL", {})
+            explain = "主要特征：" + "、".join(CN.get(f["name"], f["name"]) for f in top)
+            pf = {
+                "interval": interval,
+                "asof_utc8": datetime.fromtimestamp(decision_ms / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M"),
+                "horizon_end_utc8": datetime.fromtimestamp((decision_ms + INTERVAL_MS[interval]) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M"),
+                "horizon_end_time": datetime.fromtimestamp((decision_ms + INTERVAL_MS[interval]) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M"),
+                "ref_close": ref_close,
+                "median": float(ref_close * math.exp(float(Q[0, 2]))),
+                "p10": float(ref_close * math.exp(float(Q[0, 0]))),
+                "p25": float(ref_close * math.exp(float(Q[0, 1]))),
+                "p75": float(ref_close * math.exp(float(Q[0, 3]))),
+                "p90": float(ref_close * math.exp(float(Q[0, 4]))),
+                "width50_bps": round(float((Q[0, 3] - Q[0, 1]) * 1e4), 4),
+                "width80_bps": round(float((Q[0, 4] - Q[0, 0]) * 1e4), 4),
+                "coverage_ok": True,
+                "status": art.meta.get("status", "仅参考"),
+                "explain": explain,
+                "top_features": top,
+            }
+            age_bars = (now_ms - decision_ms) / INTERVAL_MS[interval]
+            status = "ok" if age_bars <= 2 else "stale"
+            if status != "ok":
+                pf = None
+            return {
+                "interval": interval,
+                "debug": True,
+                "status": status,
+                "price_forecast": pf,
+                "message": ("调试预测，样本外弱，勿实盘" if status == "ok" else "数据已过期，采集器可能没在跑"),
+                "model_id": art.model_id,
+                "trained_at_utc8": art.meta.get("trained_at_utc8"),
+            }
+        except Exception as exc:
+            return {"interval": interval, "debug": True, "status": "error",
+                    "message": f"{type(exc).__name__}: {exc}", "price_forecast": None}
+
+    def predict_all(self, intervals=None):
+        if intervals is None:
+            intervals = q.PRODUCT_INTERVALS
+        return {"debug": True, "debug_note": "调试预测，样本外弱，勿实盘",
+                "items": [self.predict(i) for i in intervals]}
+
+# make PredictService point to quantile service for compatibility
+PredictService = QuantilePredictService

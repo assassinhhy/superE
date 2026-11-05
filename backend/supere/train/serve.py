@@ -25,10 +25,9 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 from supere.train.config import PRODUCT_INTERVALS, TRAINABLE_INTERVALS
-from supere.train.predict import PredictService
+from supere.train.predict import QuantilePredictService as PredictService
 
 DEFAULT_PORT = 8768
-
 
 class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
