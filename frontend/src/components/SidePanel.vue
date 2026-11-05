@@ -4,6 +4,7 @@ import { state } from "../live.js";
 import { api } from "../api.js";
 import { PREDICT_INTERVALS, formatUtc8, formatUtc8Clock } from "../indicators.js";
 import { forecastRows } from "../forecastRows.js";
+import { formatNewsRows, summaryLine } from "../news.js";
 
 const props = defineProps({
   market: { type: String, required: true },
@@ -46,7 +47,6 @@ onMounted(() => {
   loadPredictions();
   predictTimer = setInterval(loadPredictions, PREDICT_POLL_MS);
 });
-onUnmounted(() => clearInterval(predictTimer));
 
 // One row per interval (5m → 4h). Missing, non-ok, or null forecasts show as 暂无预测.
 const forecast = computed(() => {
@@ -57,6 +57,32 @@ const forecast = computed(() => {
 const forecastAsof = computed(() => {
   const row = forecast.value.find((r) => r.detail?.asof);
   return row ? row.detail.asof : null;
+});
+
+// News is independent of the forecast model: a model failure must not hide it.
+const newsPayload = ref({ items: [], summary: null });
+const newsRows = computed(() => formatNewsRows(newsPayload.value.items));
+const newsLine = computed(() => summaryLine(newsPayload.value.summary));
+const newsError = ref("");
+let newsTimer = null;
+
+async function loadNews() {
+  try {
+    const payload = await api.news({ limit: 50, since_hours: 72 });
+    newsPayload.value = { items: payload.items || [], summary: payload.summary || null };
+    newsError.value = "";
+  } catch (err) {
+    newsError.value = err?.message || String(err);
+  }
+}
+
+onMounted(() => {
+  loadNews();
+  newsTimer = setInterval(loadNews, PREDICT_POLL_MS);
+});
+onUnmounted(() => {
+  clearInterval(predictTimer);
+  clearInterval(newsTimer);
 });
 
 const kinds = {
@@ -128,6 +154,33 @@ const kinds = {
         </li>
       </ul>
       <p v-if="forecastAsof" class="fine">截至 {{ forecastAsof }}（UTC+8），取已收盘的最新一根。</p>
+    </section>
+
+    <section>
+      <h2>新闻</h2>
+      <p v-if="newsError" class="fine down">新闻接口出错：{{ newsError }}</p>
+      <template v-else>
+        <p class="news-summary">{{ newsLine || "暂无新闻摘要" }}</p>
+        <p v-if="!newsRows.length" class="muted">还没有新闻。实时采集器会持续积累，面板不依赖预测模型。</p>
+        <ul v-else class="news-feed">
+          <li
+            v-for="item in newsRows"
+            :key="item.id"
+            class="news-item"
+            :class="{ urgent: item.urgent }"
+          >
+            <div class="news-meta">
+              <span>{{ item.time }}</span>
+              <span class="news-source">{{ item.source }}</span>
+              <span class="news-dir" :class="item.directionClass">{{ item.directionLabel }}</span>
+              <span v-if="item.urgent" class="news-urgent-tag">高紧急</span>
+            </div>
+            <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+            <span v-else>{{ item.title }}</span>
+          </li>
+        </ul>
+        <p class="fine">按可用时间倒序；颜色为打分方向，高紧急度条目高亮。新闻独立于预测模型。</p>
+      </template>
     </section>
 
     <section>

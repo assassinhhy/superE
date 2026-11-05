@@ -120,6 +120,53 @@ a { color: var(--brass); }
 .narrative { margin: 0 0 0.45rem; padding: 0 0 0 1.1rem; font-size: 0.74rem; line-height: 1.5; color: var(--text); }
 .narrative li { margin-bottom: 0.2rem; overflow-wrap: anywhere; }
 .narrative strong { color: var(--brass); font-weight: 600; margin-right: 0.3rem; }
+.forecast { list-style: none; margin: 0 0 0.45rem; padding: 0; font-size: 0.74rem; }
+.forecast-row { margin-bottom: 0.5rem; }
+.forecast-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.4rem; font-variant-numeric: tabular-nums; }
+.forecast-head strong { color: var(--text); font-weight: 600; }
+.forecast-status { flex: none; padding: 0 0.3rem; border: 1px solid var(--muted); border-radius: 2px; color: var(--muted); font-size: 0.66rem; font-weight: 600; }
+.forecast-status.ok { border-color: var(--brass); color: var(--brass); }
+.forecast-explain { margin: 0.15rem 0 0.1rem; color: var(--text); line-height: 1.45; overflow-wrap: anywhere; }
+.explain-line { font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.news-summary {
+  margin: 0 0 0.35rem;
+  padding: 0.3rem 0.4rem;
+  border-left: 2px solid var(--brass);
+  background: #22261b;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+.news-feed { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
+.news-item {
+  padding: 0.3rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.74rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.news-item.urgent { background: #3a2a18; border-left: 2px solid var(--warn); }
+.news-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+.news-source { color: var(--brass); }
+.news-dir { font-weight: 600; }
+.news-dir.up { color: var(--up); }
+.news-dir.down { color: var(--down); }
+.news-dir.neutral { color: var(--muted); }
+.news-urgent-tag {
+  padding: 0 0.25rem;
+  border: 1px solid var(--warn);
+  border-radius: 2px;
+  color: var(--warn);
+  font-weight: 600;
+}
 
 .status {
   display: flex;

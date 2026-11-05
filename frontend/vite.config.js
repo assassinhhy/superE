@@ -10,6 +10,7 @@ export default defineConfig({
       // Debug predictions: served by `python -m supere.train.serve` on 8768. Set
       // SUPERE_PREDICT_API to point elsewhere. Keep this entry above "/api".
       "/api/predict": process.env.SUPERE_PREDICT_API || "http://127.0.0.1:8768",
+      "/api/news": process.env.SUPERE_PREDICT_API || "http://127.0.0.1:8768",
       "/api": "http://127.0.0.1:8766",
       "/ws": { target: "ws://127.0.0.1:8766", ws: true },
     },

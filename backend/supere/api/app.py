@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from supere import __version__
 from supere.api.read import MISSING_UI_HTML, aggregate_check, catalog, disk_view, settings_view
+from supere.api.news import news_payload
 from supere.config import AppConfig
 from supere.ipc.bus import LiveHub
 from supere.storage.dal import DataAccess
@@ -284,6 +285,17 @@ def create_app(
         if not dal.ready or dal.db is None:
             raise HTTPException(503, "数据库还没准备好")
         return {"rows": [dict(row) for row in dal.db.list_fear_greed(limit)]}
+
+    @app.get("/api/news")
+    def news(limit: int = Query(default=50, ge=1, le=200),
+             since_hours: int = Query(default=72, ge=1, le=720)):
+        if not dal.ready or dal.db is None:
+            return {"items": [], "summary": None, "status": "empty", "timezone": "UTC+8"}
+        try:
+            return news_payload(dal.db.conn, limit, since_hours)
+        except Exception as exc:  # noqa: BLE001 - news must not break the API
+            return {"items": [], "summary": None, "status": "error", "timezone": "UTC+8",
+                    "message": f"{type(exc).__name__}: {exc}", "degraded": True}
 
     @app.post("/api/shutdown")
     async def shutdown():

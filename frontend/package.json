@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/indicators.test.mjs src/predictLevels.test.mjs src/predictNarrative.test.mjs src/tradableBadge.test.mjs"
+    "test": "node --test src/indicators.test.mjs src/predictLevels.test.mjs src/predictNarrative.test.mjs src/tradableBadge.test.mjs src/forecastRows.test.mjs src/news.test.mjs"
   },
   "dependencies": {
     "klinecharts": "10.1.0",

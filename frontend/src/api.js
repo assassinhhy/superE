@@ -47,6 +47,8 @@ export const api = {
   signals: () => getJSON("/api/signals"),
   // Debug predictions come from the train service on 8768 (vite proxies /api/predict there).
   predict: (interval) => getJSON(interval ? `/api/predict?${query({ interval })}` : "/api/predict"),
+  // News is served by the same train/debug service on 8768 (proxied below).
+  news: (params) => getJSON(`/api/news?${query(params || {})}`),
   aggregate: (interval, bars) =>
     getJSON(`/api/checks/aggregate?${query({ interval, bars })}`),
 };
