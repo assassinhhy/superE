@@ -1,7 +1,7 @@
 import { SERIES_PAGE, appendOlderPage } from "./indicators.js";
 
-async function getJSON(path) {
-  const response = await fetch(path);
+async function getJSON(path, options) {
+  const response = await fetch(path, options);
   if (!response.ok) {
     throw new Error(`${response.status} ${path}`);
   }
@@ -45,9 +45,10 @@ export const api = {
   catalog: () => getJSON("/api/catalog"),
   settings: () => getJSON("/api/settings"),
   signals: () => getJSON("/api/signals"),
-  // Debug predictions come from the train service on 8768 (vite proxies /api/predict there).
-  predict: (interval) => getJSON(interval ? `/api/predict?${query({ interval })}` : "/api/predict"),
-  // News is served by the same train/debug service on 8768 (proxied below).
+  // Forecasts are only fetched by the explicit 预测 button. POST runs the
+  // click-time news fetch/score/overlay on the server; there is no polling.
+  predictOnClick: () => getJSON("/api/predict", { method: "POST" }),
+  // Cached news for the panel. Reading it never runs a prediction.
   news: (params) => getJSON(`/api/news?${query(params || {})}`),
   aggregate: (interval, bars) =>
     getJSON(`/api/checks/aggregate?${query({ interval, bars })}`),
