@@ -3,9 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { state } from "../live.js";
 import { api } from "../api.js";
 import { PREDICT_INTERVALS, formatUtc8, formatUtc8Clock } from "../indicators.js";
-import { formatLevels } from "../predictLevels.js";
-import { buildNarrative } from "../predictNarrative.js";
-import { tradableBadge } from "../tradableBadge.js";
+import { forecastRows } from "../forecastRows.js";
 
 const props = defineProps({
   market: { type: String, required: true },
@@ -50,88 +48,15 @@ onMounted(() => {
 });
 onUnmounted(() => clearInterval(predictTimer));
 
-const DIR_TEXT = { up: "多", down: "空", flat: "观望" };
-const DIR_CLASS = { up: "up", down: "down", flat: "" };
-const STATE_TEXT = {
-  ok: "调试",
-  stale: "数据过期",
-  no_model: "未接入",
-  no_bars: "无 K 线",
-  gap: "有缺口",
-  no_features: "特征不全",
-  no_data: "无数据",
-  bad_model: "模型异常",
-};
+// One row per interval (5m → 4h). Missing, non-ok, or null forecasts show as 暂无预测.
+const forecast = computed(() => {
+  if (predictError.value) return [];
+  return forecastRows(Object.values(predictions.value), PREDICT_INTERVALS);
+});
 
-// Top 3 SHAP contributions for the most likely class. Contributions are raw-score
-// units: "+" pushes that class up, "−" pushes it down. They are not probabilities.
-const EXPLAIN_TEXT = { up: "多", down: "空", flat: "观望" };
-function explainBlock(p) {
-  const feats = Array.isArray(p.top_features) ? p.top_features.slice(0, 3) : [];
-  if (!feats.length) return null;
-  return {
-    head: `推动「${EXPLAIN_TEXT[p.explain_for] || p.explain_for || "—"}」的前三特征`,
-    items: feats.map((f) => {
-      const c = Number(f.contribution);
-      const sign = c > 0 ? "+" : c < 0 ? "−" : "";
-      return {
-        key: f.name,
-        text: `${f.name} ${sign}${Math.abs(c).toFixed(3)}`,
-        value: f.value == null ? "—" : Number(f.value).toPrecision(4),
-      };
-    }),
-  };
-}
-
-const signalRows = computed(() =>
-  PREDICT_INTERVALS.map((id) => {
-    const p = predictions.value[id];
-    if (!p) {
-      return {
-        interval: id,
-        dirText: "—",
-        dirClass: "",
-        probText: "—",
-        stateText: predictError.value ? "预测服务不可用" : "加载中",
-        tip: predictError.value,
-        levels: null,
-        top: null,
-      };
-    }
-    const dir = p.status === "ok" ? p.direction : null;
-    const probKey = dir ?? (p.status === "ok" ? "flat" : null);
-    const prob = probKey && p.probs ? p.probs[probKey] : null;
-    const tip = p.model_id
-      ? `模型 ${p.model_id}；训练于 ${p.trained_at_utc8}（UTC+8）；样本外准确率 ${
-          p.oos_accuracy == null ? "—" : (p.oos_accuracy * 100).toFixed(1) + "%"
-        }。${p.message || ""}`
-      : p.message || "";
-    return {
-      interval: id,
-      dirText: dir ? DIR_TEXT[dir] : "—",
-      dirClass: dir ? DIR_CLASS[dir] : "",
-      probText: prob == null ? "—" : `${(prob * 100).toFixed(1)}%`,
-      stateText: STATE_TEXT[p.status] || p.status || "—",
-      tip,
-      levels: formatLevels(p),
-      top: explainBlock(p),
-      badge: tradableBadge(p),
-    };
-  }),
-);
-
-// The default read-out: a short Chinese explanation in a fixed order (结论 → 现价/关键位 →
-// 分周期 → 资金面 → 点位 → 高杠杆提醒 → 调试勿实盘). Feature contributions stay folded.
-const narrative = computed(() =>
-  buildNarrative({
-    items: PREDICT_INTERVALS.map((id) => predictions.value[id]),
-    price: price.value === "—" ? null : price.value,
-  }),
-);
-
-const signalAsof = computed(() => {
-  const first = Object.values(predictions.value).find((p) => p.asof_utc8);
-  return first ? first.asof_utc8 : null;
+const forecastAsof = computed(() => {
+  const row = forecast.value.find((r) => r.detail?.asof);
+  return row ? row.detail.asof : null;
 });
 
 const kinds = {
@@ -175,58 +100,34 @@ const kinds = {
     </section>
 
     <section v-if="market === 'um'">
-      <h2>信号</h2>
+      <h2>预测区间</h2>
       <p class="debug-banner">调试预测，样本外弱，勿实盘</p>
-      <p class="fine">五个周期的调试模型都显示出来，效果好坏都在这里。没有模型的周期才标「未接入」。</p>
+      <p class="fine">价格区间预测：主行为中位数，括号内为 25%–75% 区间。不是方向，也不是交易点位。</p>
       <p v-if="predictError" class="fine down">预测接口出错：{{ predictError }}</p>
-      <ol v-if="!predictError" class="narrative">
-        <li v-for="line in narrative.lines" :key="line.key">
-          <strong>{{ line.label }}</strong>
-          <span>{{ line.text }}</span>
-        </li>
-      </ol>
-      <table class="signals">
-        <thead>
-          <tr>
-            <th>周期</th>
-            <th>方向</th>
-            <th>概率</th>
-            <th>状态</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template v-for="row in signalRows" :key="row.interval">
-            <tr :title="row.tip">
-              <td>{{ row.interval }}</td>
-              <td :class="row.dirClass">{{ row.dirText }}</td>
-              <td>{{ row.probText }}</td>
-              <td>
-                {{ row.stateText }}
-                <span v-if="row.badge" class="tradable-badge" :title="row.badge.reason || row.badge.text">{{ row.badge.text }}</span>
-                <small v-if="row.badge && row.badge.reason" class="tradable-reason">{{ row.badge.reason }}</small>
-              </td>
-            </tr>
-            <tr v-if="row.levels || row.top" class="explain-row">
-              <td colspan="4">
-                <details class="explain-fold">
-                  <summary>点位与特征（展开）</summary>
-                  <div v-if="row.levels" class="levels-line" :class="{ muted: row.levels.muted }">{{ row.levels.text }}</div>
-                  <template v-if="row.top">
-                    <div class="explain-head">{{ row.top.head }}</div>
-                    <ul class="explain-list">
-                      <li v-for="f in row.top.items" :key="f.key">
-                        <span>{{ f.text }}</span>
-                        <span class="explain-value">= {{ f.value }}</span>
-                      </li>
-                    </ul>
-                  </template>
-                </details>
-              </td>
-            </tr>
+      <ul v-else class="forecast">
+        <li v-for="row in forecast" :key="row.interval" class="forecast-row">
+          <template v-if="row.hasForecast">
+            <div class="forecast-head">
+              <strong>{{ row.headline }}</strong>
+              <span class="forecast-status" :class="{ ok: row.status === '达标' }">{{ row.status }}</span>
+            </div>
+            <p class="forecast-explain">{{ row.explain }}</p>
+            <details class="explain-fold">
+              <summary>80%区间与宽度（展开）</summary>
+              <div class="explain-line">{{ row.detail.interval80 }}</div>
+              <div class="explain-line">{{ row.detail.width50 }}</div>
+              <div class="explain-line">{{ row.detail.width80 }}</div>
+            </details>
           </template>
-        </tbody>
-      </table>
-      <p v-if="signalAsof" class="fine">截至 {{ signalAsof }}（UTC+8），取已收盘的最新一根。</p>
+          <template v-else>
+            <div class="forecast-head">
+              <strong>{{ row.headline }}</strong>
+            </div>
+            <p class="fine">{{ row.message }}</p>
+          </template>
+        </li>
+      </ul>
+      <p v-if="forecastAsof" class="fine">截至 {{ forecastAsof }}（UTC+8），取已收盘的最新一根。</p>
     </section>
 
     <section>
