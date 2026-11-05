@@ -545,6 +545,14 @@ class Database:
             "score_json",
             "user_label",
             "status",
+            "available_at",
+            "timing_quality",
+            "direction_score",
+            "urgency",
+            "magnitude",
+            "event_type",
+            "confidence",
+            "score_version",
         ]
         values = [fields.get(name) for name in columns]
         placeholders = ",".join("?" for _ in columns)
@@ -554,6 +562,30 @@ class Database:
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def update_news_score(self, news_id: int, fields: dict) -> None:
+        allowed = {
+            "direction", "impact", "eth_relevance", "credibility", "scored_by",
+            "score_json", "status", "available_at", "timing_quality",
+            "direction_score", "urgency", "magnitude", "event_type", "confidence",
+            "score_version",
+        }
+        cols = [name for name in fields if name in allowed]
+        if not cols:
+            return
+        assignments = ",".join(f"{name}=?" for name in cols)
+        self.conn.execute(
+            f"UPDATE news SET {assignments} WHERE id=?",
+            (*[fields[name] for name in cols], int(news_id)),
+        )
+        self.conn.commit()
+
+    def unscored_news(self, limit: int = 200) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM news WHERE scored_by IS NULL OR scored_by='' OR scored_by='pending' "
+            "ORDER BY ts_ingested DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
 
     def news_by_url_hash(self, url_hash: str) -> sqlite3.Row | None:
         return self.conn.execute(

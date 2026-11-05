@@ -26,8 +26,55 @@ from fastapi.responses import JSONResponse
 
 from supere.train.config import PRODUCT_INTERVALS, TRAINABLE_INTERVALS
 from supere.train.predict import QuantilePredictService as PredictService
+from supere.timeutil import format_utc8
 
 DEFAULT_PORT = 8768
+
+
+def _news_payload(data_root: Path, limit: int, since_hours: int) -> dict:
+    """Latest news plus a one-line aggregate. Never blocks /api/predict."""
+    import time
+    from supere.news.scoring import list_news
+    now_ms = int(time.time() * 1000)
+    since_ms = now_ms - int(since_hours) * 3_600_000
+    try:
+        rows = list_news(Path(data_root) / "superE.sqlite", limit=limit, since_ms=since_ms)
+    except Exception as exc:  # noqa: BLE001 - news is independent of the forecast
+        return {"items": [], "summary": None, "status": "error",
+                "message": f"{type(exc).__name__}: {exc}", "timezone": "UTC+8"}
+    items = []
+    for row in rows:
+        item = dict(row)
+        if item.get("available_at"):
+            item["available_at_utc8"] = format_utc8(int(item["available_at"]))
+        if item.get("ts_published"):
+            item["ts_published_utc8"] = format_utc8(int(item["ts_published"]))
+        if item.get("ts_ingested"):
+            item["ts_ingested_utc8"] = format_utc8(int(item["ts_ingested"]))
+        items.append(item)
+    total_w = 0.0
+    net = 0.0
+    high = 0
+    for item in items:
+        w = max(0.05, float(item.get("relevance") or 0.0))
+        total_w += w
+        net += float(item.get("direction") or 0.0) * w
+        if float(item.get("urgency") or 0.0) >= 0.7:
+            high += 1
+    net_score = (net / total_w) if total_w else 0.0
+    label = "偏多" if net_score > 0.12 else ("偏空" if net_score < -0.12 else "中性")
+    summary = {
+        "label": label,
+        "net_sentiment": round(float(net_score), 4),
+        "count": len(items),
+        "high_urgency": high,
+        "window_hours": int(since_hours),
+        "line": f"近 {since_hours}h 新闻 {len(items)} 条，整体{label}"
+                + (f"，高紧急度 {high} 条" if high else ""),
+    }
+    return {"items": items, "summary": summary, "status": "ok" if items else "empty",
+            "timezone": "UTC+8", "degraded": not bool(items),
+            "note": "direction 为 DeepSeek/规则打分，仅辅助解释，不构成交易建议。"}
 
 class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
@@ -52,6 +99,11 @@ def create_app(data_root: Path) -> FastAPI:
                          "message": f"不支持的周期 {interval}；可选 {', '.join(TRAINABLE_INTERVALS)}"},
             )
         return service.predict(interval)
+
+    @app.get("/api/news")
+    def news(limit: int = Query(default=50, ge=1, le=200),
+             since_hours: int = Query(default=72, ge=1, le=720)):
+        return _news_payload(Path(data_root), limit, since_hours)
 
     return app
 

@@ -364,6 +364,7 @@ class QuantilePredictService:
         self.bar_limit = bar_limit
         self._clock = clock or _t.time
         self._cache = {}
+        self._v3_cache = {}
 
     def _artifact(self, interval):
         import supere.train.quantile as q
@@ -372,6 +373,12 @@ class QuantilePredictService:
         art = q.load_quantile(self.data_root, interval)
         self._cache[interval] = art
         return art
+
+    def _v3_artifact(self, interval):
+        import supere.train.quantile_v3 as v3
+        if interval not in self._v3_cache:
+            self._v3_cache[interval] = v3.load_v3(self.data_root, interval)
+        return self._v3_cache[interval]
 
     def predict(self, interval):
         import math
@@ -384,6 +391,20 @@ class QuantilePredictService:
         if interval not in PRODUCT:
             return {"interval": interval, "debug": True, "status": "bad_interval",
                     "message": f"不支持的周期 {interval}", "price_forecast": None}
+        # Version 3 artifacts decompose scale and shape.  They are served by the
+        # same contract; v2 artifacts keep using the code below.
+        try:
+            from supere.train import quantile_v3 as v3
+            v3_art = self._v3_artifact(interval)
+            if v3_art is not None:
+                now_ms = int(self._clock() * 1000)
+                res = v3.predict_latest(self.data_root, interval, v3_art, now_ms)
+                res["debug_note"] = "价格区间预测，样本外弱，勿实盘"
+                return res
+        except Exception as exc:  # noqa: BLE001 - fall back to an explicit error item
+            log.exception("v3 预测 %s 出错", interval)
+            return {"interval": interval, "debug": True, "status": "error",
+                    "message": f"{type(exc).__name__}: {exc}", "price_forecast": None}
         art = self._artifact(interval)
         if art is None:
             return {"interval": interval, "debug": True, "status": "no_model",
