@@ -54,7 +54,7 @@ import numpy as np
 
 from supere.intervals import INTERVAL_MS
 from supere.timeutil import UTC8 as _UTC8
-from supere.train import data, features
+from supere.train import altdata, data, features
 from supere.train.runner import WINDOW_LOOKBACK
 
 ALPHAS: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 0.90)
@@ -70,9 +70,12 @@ DEFAULT_LIMIT: dict[str, int | None] = {"5m": 200_000, "15m": 200_000, "30m": No
 
 DROP_FEATURES = ()  # testing calendar features
 ZSCORE_SOURCES = ("taker_buy_ratio", "log_trades", "um_oi_chg_1h", "um_global_lsr", "um_taker_lsr", "funding_last",                  "mark_basis", "index_basis", "premium_index")
-OPTIONAL_PREFIXES = ("um_", "funding_", "mark_", "index_", "premium_")  # may be NaN; not required to be finite
+# May be NaN (history starts later, or the series is optional); not required to be finite.
+OPTIONAL_PREFIXES = ("um_", "funding_", "mark_", "index_", "premium_",
+                     "btc_", "eth_btc_", "dvol_", "macro_")
+FEATURE_GROUPS: tuple[str, ...] = ("btc", "dvol", "macro")
 ZWIN = 100
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 CN_LABEL = {
     "ret_1": "上一根涨跌", "ret_3": "3根涨跌", "ret_5": "5根涨跌", "ret_10": "10根涨跌",
@@ -86,6 +89,17 @@ CN_LABEL = {
     "um_top_acc_lsr": "大户账户多空比", "um_global_lsr": "全局多空比", "um_taker_lsr": "主动买卖比",
     "ewma_vol_fast": "短期 EWMA 波动", "ewma_vol_slow": "长期 EWMA 波动",
     "vol_fast_slow": "短长波动比", "absret_1": "上一根绝对涨跌",
+    "btc_ret_1": "BTC 上一根涨跌", "btc_ret_3": "BTC 3根涨跌", "btc_ret_5": "BTC 5根涨跌",
+    "btc_ret_20": "BTC 20根涨跌", "btc_rv_20": "BTC 20根波动", "btc_rv_50": "BTC 50根波动",
+    "eth_btc_rs_1": "ETH/BTC 相对强弱1根", "eth_btc_rs_3": "ETH/BTC 相对强弱3根",
+    "eth_btc_rs_5": "ETH/BTC 相对强弱5根", "eth_btc_rs_20": "ETH/BTC 相对强弱20根",
+    "eth_btc_corr_20": "ETH-BTC 20根相关", "eth_btc_corr_60": "ETH-BTC 60根相关",
+    "eth_btc_beta_20": "ETH 对 BTC 的 beta", "eth_btc_vol_ratio_20": "ETH/BTC 波动比",
+    "dvol_level": "DVOL 水平", "dvol_chg_1h": "DVOL 1小时变化", "dvol_chg_4h": "DVOL 4小时变化",
+    "dvol_chg_1d": "DVOL 1天变化", "dvol_chg_7d": "DVOL 7天变化", "dvol_z_30d": "DVOL 30天 z",
+    "dvol_rv_ratio": "DVOL/实现波动", "macro_min_to_next": "距下一宏观事件",
+    "macro_min_since_prev": "距上一宏观事件", "macro_in_next_window": "下窗口有宏观事件",
+    "macro_in_prev_window": "上窗口有宏观事件",
 }
 
 
@@ -111,6 +125,8 @@ class QConfig:
     n_folds: int = 5
     holdout_frac: float = 0.15
     embargo: int = 3
+    feature_groups: str = ""  # comma list of btc,dvol,macro
+    btc_symbol: str = "BTCUSDT"
     ewma_lambda: float = 0.94
     aci_gamma: float = 0.0
     vol_model: str = "ewma"  # ewma | garch
@@ -143,10 +159,20 @@ def validate(cfg: QConfig) -> None:
         raise QuantileError("vol_model bad")
     if cfg.calib not in ("none", "cqr"):
         raise QuantileError("calib 只能是 none 或 cqr")
+    bad = feature_groups(cfg) - set(FEATURE_GROUPS)
+    if bad:
+        raise QuantileError(f"未知特征组 {sorted(bad)}；可选 {', '.join(FEATURE_GROUPS)}")
     if not 0.0 < cfg.calib_frac < 0.5:
         raise QuantileError("calib_frac 必须在 (0, 0.5)")
     if cfg.n_folds < 1 or not 0.0 < cfg.holdout_frac < 0.5:
         raise QuantileError("折数或留存比例不合法")
+
+
+def feature_groups(cfg: QConfig) -> set[str]:
+    text = (cfg.feature_groups or "").strip().lower()
+    if text in ("all", "全部"):
+        return set(FEATURE_GROUPS)
+    return {part.strip() for part in text.split(",") if part.strip()}
 
 
 def parse_overrides(pairs: list[str], base: QConfig) -> dict:
@@ -217,7 +243,9 @@ def build_features(bars: data.Bars, funding: data.Funding | None, metrics: data.
                     cfg: QConfig, mark_bars: data.Bars | None = None,
                     index_bars: data.Bars | None = None,
                     premium_bars: data.Bars | None = None,
-                    higher_bars: data.Bars | None = None) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+                    higher_bars: data.Bars | None = None,
+                    alt: altdata.AltData | None = None,
+                    btc_bars: data.Bars | None = None) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
 
     """Causal features for every bar. Returns ``(names, X, sigma, r1)``.
 
@@ -288,6 +316,14 @@ def build_features(bars: data.Bars, funding: data.Funding | None, metrics: data.
         for name in ZSCORE_SOURCES:
             if name in cols:
                 cols[f"{name}_z{ZWIN}"] = _zscore(cols[name], ZWIN)
+    # Alternative inputs (plan 追加 2026-11-05 15:00): BTC context, DVOL, macro calendar.
+    # Appended after the base columns so old feature lists keep their order.
+    groups = feature_groups(cfg)
+    if groups:
+        if btc_bars is not None:
+            alt = replace(alt, btc=btc_bars) if alt is not None else altdata.AltData(btc=btc_bars)
+        extra = altdata.build_columns(bars, bars.close_time, bars.interval_ms, sig, alt, groups)
+        cols.update(extra)
     out_names = list(cols)
     out_x = np.column_stack([cols[n] for n in out_names]).astype(np.float64)
     return out_names, out_x, sig, r1
@@ -325,8 +361,11 @@ def core_index(names: list[str]) -> list[int]:
 def make_samples(bars: data.Bars, funding: data.Funding, metrics: data.Metrics, cfg: QConfig,
                  mark_bars: data.Bars | None = None, index_bars: data.Bars | None = None,
                  premium_bars: data.Bars | None = None,
-                 higher_bars: data.Bars | None = None) -> Samples:
-    names, X, sig, r1 = build_features(bars, funding, metrics, cfg, mark_bars, index_bars, premium_bars, higher_bars)
+                 higher_bars: data.Bars | None = None,
+                 alt: altdata.AltData | None = None,
+                 btc_bars: data.Bars | None = None) -> Samples:
+    names, X, sig, r1 = build_features(bars, funding, metrics, cfg, mark_bars, index_bars, premium_bars,
+                                       higher_bars, alt, btc_bars)
 
     n = bars.n
     y = np.full(n, np.nan)
@@ -350,6 +389,7 @@ def make_samples(bars: data.Bars, funding: data.Funding, metrics: data.Metrics, 
 
 
 def load_samples(cfg: QConfig, db_path: Path) -> Samples:
+    groups = feature_groups(cfg)
     conn = data.open_readonly(db_path)
     try:
         bars = data.load_bars(conn, cfg.market, cfg.symbol, cfg.interval, cfg.limit_bars,
@@ -365,9 +405,17 @@ def load_samples(cfg: QConfig, db_path: Path) -> Samples:
         htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(cfg.interval)
         higher = data.load_bars(conn, "um", cfg.symbol, htf_interval, None,
                                close_by_ms=cfg.snapshot_ms) if htf_interval else None
+        btc_bars = None
+        if "btc" in groups:
+            try:
+                btc_bars = data.load_bars(conn, cfg.market, cfg.btc_symbol, cfg.interval, cfg.limit_bars,
+                                          close_by_ms=cfg.snapshot_ms)
+            except ValueError as exc:
+                log.warning("BTC 数据不可用，%s 组按缺失处理: %s", cfg.interval, exc)
     finally:
         conn.close()
-    return make_samples(bars, funding, metrics, cfg, mark, index, premium, higher)
+    alt = altdata.load_alt(Path(db_path).parent, groups, btc=btc_bars)
+    return make_samples(bars, funding, metrics, cfg, mark, index, premium, higher, alt, btc_bars)
 
 
 
@@ -874,3 +922,7 @@ def _quantile_explain(booster, names, row, top=3):
     order = np.argsort(-np.abs(seg), kind="stable")[:top]
     return [{"name": names[i], "contribution": round(float(seg[i]), 6),
              "value": (float(row[i]) if np.isfinite(row[i]) else None)} for i in order]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

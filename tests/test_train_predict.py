@@ -13,7 +13,8 @@ from synthetic import START_MS, build_synthetic_db
 from supere.intervals import INTERVAL_MS
 from supere.train import artifacts, config as tcfg
 from supere.train.__main__ import main
-from supere.train.predict import PredictService, direction, latest_probs, closed_count
+from supere.train.predict import (ClassificationPredictService as PredictService, closed_count,
+                                  direction, latest_probs)
 from supere.train.runner import run
 from supere.train import data, features
 

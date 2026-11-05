@@ -27,7 +27,7 @@ import numpy as np
 
 from supere.intervals import INTERVAL_MS
 from supere.timeutil import UTC8
-from supere.train import artifacts, data, features
+from supere.train import altdata, artifacts, data, features
 from supere.train.artifacts import DEBUG_NOTE, Artifact, ArtifactError
 from supere.train.config import PRODUCT_INTERVALS, TRAINABLE_INTERVALS
 from supere.train.runner import WINDOW_LOOKBACK
@@ -392,6 +392,7 @@ class QuantilePredictService:
             return {"interval": interval, "debug": True, "status": "no_data",
                     "message": f"找不到数据库 {self.db_path}", "price_forecast": None}
         cfg = art.meta["config"]
+        groups = q.feature_groups(q.default_config(interval, cfg))
         now_ms = int(self._clock() * 1000)
         try:
             conn = data.open_readonly(self.db_path)
@@ -402,8 +403,16 @@ class QuantilePredictService:
                 mark = data.load_bars(conn, "um_mark", cfg["symbol"], interval, self.bar_limit)
                 index = data.load_bars(conn, "um_index", cfg["symbol"], interval, self.bar_limit)
                 premium = data.load_bars(conn, "um_premium", cfg["symbol"], interval, self.bar_limit)
+                btc_bars = None
+                if "btc" in groups:
+                    btc_bars = data.load_bars(conn, cfg["market"], cfg.get("btc_symbol", "BTCUSDT"),
+                                              interval, self.bar_limit)
             finally:
                 conn.close()
+            if btc_bars is not None:
+                # Only BTC bars already closed at ``now``; alignment is by open time.
+                n_btc = int(np.searchsorted(btc_bars.close_time, now_ms, side="right"))
+                btc_bars = btc_bars.slice_to(n_btc)
             htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(interval)
             higher = None
             if htf_interval:
@@ -412,6 +421,7 @@ class QuantilePredictService:
                     higher = data.load_bars(conn, "um", cfg["symbol"], htf_interval, None)
                 finally:
                     conn.close()
+            alt = altdata.load_alt(self.data_root, groups, btc=btc_bars)
             n_closed = int(np.searchsorted(bars.close_time, now_ms, side="right"))
             if n_closed == 0:
                 return {"interval": interval, "debug": True, "status": "no_bars",
@@ -421,7 +431,7 @@ class QuantilePredictService:
             names, X, sig, r1 = q.build_features(
                 closed, funding if cfg.get("use_funding") else None,
                 metrics_in if cfg.get("use_metrics") else None, q.default_config(interval, cfg),
-                mark, index, premium, higher)
+                mark, index, premium, higher, alt=alt, btc_bars=btc_bars)
             if names != art.names:
                 raise q.QuantileError(f"{interval} 的特征列表和当前代码不一致，需要重新训练")
             row = X[last]
@@ -479,5 +489,8 @@ class QuantilePredictService:
         return {"debug": True, "debug_note": "调试预测，样本外弱，勿实盘",
                 "items": [self.predict(i) for i in intervals]}
 
-# make PredictService point to quantile service for compatibility
+# The product route serves the quantile service. The earlier classification
+# debug service is kept under its own name for its tests and for callers that
+# still expect ``direction`` + ``levels``.
+ClassificationPredictService = PredictService
 PredictService = QuantilePredictService
