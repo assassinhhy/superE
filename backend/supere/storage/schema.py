@@ -190,7 +190,10 @@ CREATE TABLE IF NOT EXISTS news (
   magnitude REAL,
   event_type TEXT,
   confidence REAL,
-  score_version TEXT
+  score_version TEXT,
+  content_hash TEXT,
+  summary_zh TEXT,
+  sentiment_label TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_url_hash ON news(url_hash);
@@ -267,6 +270,9 @@ NEWS_ADDED_COLUMNS = {
     "event_type": "TEXT",
     "confidence": "REAL",
     "score_version": "TEXT",
+    "content_hash": "TEXT",
+    "summary_zh": "TEXT",
+    "sentiment_label": "TEXT",
 }
 
 
@@ -274,5 +280,6 @@ def init_schema(conn) -> None:
     conn.executescript(SCHEMA_SQL)
     _ensure_columns(conn, "news", NEWS_ADDED_COLUMNS)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_news_available ON news(available_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_news_content ON news(content_hash)")
     conn.execute("PRAGMA user_version=1")
     conn.commit()

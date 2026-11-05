@@ -191,7 +191,7 @@ def test_news_api_payload(tmp_path: Path):
     db.close()
     payload = _news_payload(tmp_path, 50, 72)
     assert payload["status"] == "ok"
-    assert payload["summary"]["label"] == "偏多"
+    assert payload["summary"]["label"] == "利多"
     assert payload["summary"]["high_urgency"] == 1
     assert payload["items"][0]["available_at_utc8"]
     from fastapi.testclient import TestClient

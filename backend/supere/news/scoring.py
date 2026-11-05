@@ -12,6 +12,7 @@ already has that version is skipped.  Failures are retried and left with
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -24,8 +25,8 @@ import httpx
 from supere import secrets
 from supere.storage.db import Database
 
-SCORER_VERSION = "ds-v1"
-PROMPT_VERSION = "p1"
+SCORER_VERSION = "ds-v2"
+PROMPT_VERSION = "p2"
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 PROXY = "http://127.0.0.1:7890"
@@ -35,7 +36,8 @@ SYSTEM_PROMPT = (
     "For each item rate: eth_relevance (0-1, how relevant to ETH price), "
     "direction (-1 bearish .. +1 bullish for ETH), urgency (0-1, how urgent/market-moving), "
     "magnitude (0-1, expected size of impact), event_type (short snake_case label), "
-    "confidence (0-1). Do not use hindsight; classify the headline as it would read at publication."
+    "confidence (0-1), summary_zh (1-2 short Chinese sentences: what happened and why it matters to ETH; "
+    "conservative, no trading advice). Do not use hindsight; classify the headline as it would read at publication."
 )
 
 POS_WORDS = {
@@ -74,10 +76,66 @@ class Score:
     event_type: str
     confidence: float
     scorer: str
+    summary_zh: str = ""
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(x)))
+
+
+def sentiment_label(direction: float) -> str:
+    d = float(direction)
+    if d > 0.12:
+        return "利多"
+    if d < -0.12:
+        return "利空"
+    return "中性"
+
+
+def _urgency_word(urgency: float) -> str:
+    if urgency >= 0.7:
+        return "高"
+    if urgency >= 0.4:
+        return "中"
+    return "低"
+
+
+EVENT_CN = {
+    "regulation": "监管消息",
+    "security": "安全事件",
+    "macro": "宏观消息",
+    "flows": "资金流消息",
+    "tech": "技术/网络消息",
+    "general": "市场消息",
+}
+
+EVENT_WHY = {
+    "regulation": "可能改变监管预期，进而影响 ETH 的风险溢价",
+    "security": "可能影响市场对交易所和 ETH 的信心",
+    "macro": "可能通过利率预期和风险偏好影响 ETH",
+    "flows": "可能反映资金流向变化，进而影响 ETH 的买盘",
+    "tech": "可能影响以太坊网络预期与 ETH 情绪",
+    "general": "可能通过市场情绪和资金流影响 ETH",
+}
+
+
+def content_hash(title: str, body: str = "") -> str:
+    """Stable content identity used to cache scores across sources."""
+    text = f"{(title or '').strip()}\n{(body or '').strip()[:1000]}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def rule_summary_zh(title: str, event_type: str, direction: float, urgency: float,
+                   relevance: float) -> str:
+    """Fallback summary written from the headline only; never invents facts."""
+    label = sentiment_label(direction)
+    clean = re.sub(r"\s+", " ", (title or "").strip()).rstrip("。.!！?？")
+    if len(clean) > 90:
+        clean = clean[:87] + "…"
+    what = clean or "标题信息不足"
+    why = EVENT_WHY.get(event_type, EVENT_WHY["general"])
+    uncertainty = "细节和影响幅度仍不确定。" if relevance < 0.6 else "具体影响仍取决于市场反应。"
+    return f"{what}。这条{EVENT_CN.get(event_type, EVENT_CN['general'])}被判断为{label}，{why}；{uncertainty}"
 
 
 def rule_score(title: str, body: str = "") -> Score:
@@ -97,9 +155,11 @@ def rule_score(title: str, body: str = "") -> Score:
         if any(w in text for w in words):
             event = name
             break
-    return Score(eth_relevance=round(relevance, 3), direction=round(_clip(direction, -1, 1), 3),
+    direction = _clip(direction, -1, 1)
+    return Score(eth_relevance=round(relevance, 3), direction=round(direction, 3),
                  urgency=round(urgency, 3), magnitude=round(magnitude, 3),
-                 event_type=event, confidence=0.35, scorer="rule_fallback")
+                 event_type=event, confidence=0.35, scorer="rule_fallback",
+                 summary_zh=rule_summary_zh(title, event, direction, urgency, relevance))
 
 
 def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
@@ -123,6 +183,7 @@ def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
                 event_type=str(row.get("event_type", "general"))[:40],
                 confidence=_clip(float(row.get("confidence", 0.5)), 0, 1),
                 scorer="deepseek",
+                summary_zh=str(row.get("summary_zh", "") or "").strip(),
             )
         except (TypeError, ValueError):
             continue
@@ -130,7 +191,7 @@ def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
 
 
 def score_batch_deepseek(items: list[dict], key: str, *, proxy: str = PROXY,
-                         retries: int = 3) -> dict[int, Score] | None:
+                         retries: int = 3, timeout: float = 45.0) -> dict[int, Score] | None:
     """One request for a batch of ``{id,title,body}``. ``None`` means the call failed."""
     ids = [int(item["id"]) for item in items]
     user = json.dumps(
@@ -151,7 +212,7 @@ def score_batch_deepseek(items: list[dict], key: str, *, proxy: str = PROXY,
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     for attempt in range(retries):
         try:
-            with httpx.Client(timeout=45.0, proxy=proxy) as client:
+            with httpx.Client(timeout=timeout, proxy=proxy) as client:
                 resp = client.post(DEEPSEEK_URL, headers=headers, json=body)
             if resp.status_code == 200:
                 parsed = _parse_scores(resp.json(), ids)
@@ -211,6 +272,11 @@ def score_pending(db_path: Path, *, limit: int = 2000, batch_size: int = 10,
                     counts["deepseek"] += 1
                     if item.scorer != "deepseek":
                         counts["rule"] += 1
+                if not item.summary_zh:
+                    item.summary_zh = rule_summary_zh(
+                        str(row.get("title") or ""), item.event_type, item.direction,
+                        item.urgency, item.eth_relevance,
+                    )
                 fields = {
                     "available_at": _visible_at(row),
                     "timing_quality": _timing_quality(row),
@@ -224,11 +290,130 @@ def score_pending(db_path: Path, *, limit: int = 2000, batch_size: int = 10,
                     "confidence": item.confidence,
                     "scored_by": item.scorer,
                     "score_version": f"{SCORER_VERSION}:{PROMPT_VERSION}",
+                    "content_hash": content_hash(str(row.get("title") or ""), str(row.get("body") or "")),
+                    "summary_zh": item.summary_zh,
+                    "sentiment_label": sentiment_label(item.direction),
                     "score_json": json.dumps(asdict(item), ensure_ascii=False),
                     "status": "scored",
                 }
                 db.update_news_score(int(row["id"]), fields)
         return counts
+    finally:
+        db.close()
+
+
+def score_version() -> str:
+    return f"{SCORER_VERSION}:{PROMPT_VERSION}"
+
+
+def _score_from_row(row) -> Score:
+    raw = {}
+    try:
+        raw = json.loads(row["score_json"] or "{}")
+    except (TypeError, ValueError, KeyError):
+        raw = {}
+    direction = row["direction_score"] if row["direction_score"] is not None else raw.get("direction", 0.0)
+    return Score(
+        eth_relevance=float(row["eth_relevance"] if row["eth_relevance"] is not None
+                            else raw.get("eth_relevance", 0.0)),
+        direction=float(direction or 0.0),
+        urgency=float(row["urgency"] if row["urgency"] is not None else raw.get("urgency", 0.0)),
+        magnitude=float(row["magnitude"] if row["magnitude"] is not None else raw.get("magnitude", 0.0)),
+        event_type=str(row["event_type"] or raw.get("event_type", "general")),
+        confidence=float(row["confidence"] if row["confidence"] is not None else raw.get("confidence", 0.35)),
+        scorer=str(row["scored_by"] or raw.get("scorer", "rule_fallback")),
+        summary_zh=str(row["summary_zh"] or raw.get("summary_zh", "") or ""),
+    )
+
+
+def score_items(db_path: Path, items: list[dict], *, use_deepseek: bool = True,
+                proxy: str = PROXY, timeout: float = 15.0,
+                batch_size: int = 8) -> dict:
+    """Score freshly fetched rows before a click-time overlay.
+
+    ``items`` are dicts with ``id``, ``title``, ``body``, ``url`` and optional
+    ``content_hash``.  Results are keyed by content hash.  Scores are reused when
+    the same content already has the current scorer/prompt version, so repeated
+    clicks do not call DeepSeek again.  A missing key or a failed call degrades to
+    the deterministic rule scorer; neither can block the forecast.
+    """
+    version = score_version()
+    result: dict[str, Score] = {}
+    counts = {"items": len(items), "cached": 0, "deepseek": 0, "rule": 0, "failed": 0,
+              "deepseek_configured": secrets.deepseek_configured()}
+    if not items:
+        return {"scores": result, "counts": counts, "version": version}
+    key = secrets.deepseek_api_key() if use_deepseek else None
+    db = Database(Path(db_path))
+    try:
+        pending: list[tuple[dict, str]] = []
+        seen: set[str] = set()
+        for item in items:
+            title = str(item.get("title") or "")
+            body = str(item.get("body") or "")
+            ch = str(item.get("content_hash") or content_hash(title, body))
+            if ch in seen:
+                continue
+            seen.add(ch)
+            cached = db.news_by_content_version(ch, version)
+            if cached is not None:
+                score = _score_from_row(cached)
+                if not score.summary_zh:
+                    score.summary_zh = rule_summary_zh(
+                        title, score.event_type, score.direction, score.urgency, score.eth_relevance
+                    )
+                result[ch] = score
+                counts["cached"] += 1
+                continue
+            pending.append((item, ch))
+
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            deepseek_rows: dict[int, Score] | None = None
+            if key:
+                payload = [{"id": index, "title": str(item.get("title") or "")[:400],
+                            "body": str(item.get("body") or "")[:600]}
+                           for index, (item, _ch) in enumerate(batch)]
+                deepseek_rows = score_batch_deepseek(
+                    payload, key, proxy=proxy, retries=1, timeout=timeout
+                )
+            for index, (item, ch) in enumerate(batch):
+                title = str(item.get("title") or "")
+                body = str(item.get("body") or "")
+                score = deepseek_rows.get(index) if deepseek_rows else None
+                if score is None:
+                    score = rule_score(title, body)
+                    if key:
+                        counts["failed"] += 1
+                    else:
+                        counts["rule"] += 1
+                else:
+                    counts["deepseek"] += 1
+                if not score.summary_zh:
+                    score.summary_zh = rule_summary_zh(
+                        title, score.event_type, score.direction, score.urgency, score.eth_relevance
+                    )
+                result[ch] = score
+                news_id = item.get("id")
+                if news_id is not None:
+                    db.update_news_score(int(news_id), {
+                        "direction": int(1 if score.direction > 0.15 else (-1 if score.direction < -0.15 else 0)),
+                        "direction_score": score.direction,
+                        "impact": int(round(score.urgency * 3)),
+                        "eth_relevance": score.eth_relevance,
+                        "urgency": score.urgency,
+                        "magnitude": score.magnitude,
+                        "event_type": score.event_type,
+                        "confidence": score.confidence,
+                        "scored_by": score.scorer,
+                        "score_version": version,
+                        "content_hash": ch,
+                        "summary_zh": score.summary_zh,
+                        "sentiment_label": sentiment_label(score.direction),
+                        "score_json": json.dumps(asdict(score), ensure_ascii=False),
+                        "status": "scored",
+                    })
+        return {"scores": result, "counts": counts, "version": version}
     finally:
         db.close()
 
@@ -250,6 +435,9 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
         magnitude = "COALESCE(magnitude, 0.0)" if "magnitude" in cols else "0.0"
         event = "COALESCE(event_type, '')" if "event_type" in cols else "''"
         timing = "COALESCE(timing_quality, '')" if "timing_quality" in cols else "''"
+        summary = "COALESCE(summary_zh, '')" if "summary_zh" in cols else "''"
+        label = "COALESCE(sentiment_label, '')" if "sentiment_label" in cols else "''"
+        content = "COALESCE(content_hash, '')" if "content_hash" in cols else "''"
         relevance = "COALESCE(eth_relevance, 0.0)"
         where = "1=1"
         args: list = []
@@ -258,12 +446,13 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
             args.append(int(since_ms))
         sql = (f"SELECT id, {avail} AS available_at, ts_published, ts_ingested, source, title, url, "
                f"{relevance}, {direction}, {urgency}, {magnitude}, {event}, {timing}, "
-               f"COALESCE(scored_by,''), COALESCE(score_version,'') "
+               f"COALESCE(scored_by,''), COALESCE(score_version,''), {summary}, {label}, {content} "
                f"FROM news WHERE {where} ORDER BY available_at DESC, id DESC LIMIT ?")
         rows = conn.execute(sql, (*args, int(limit))).fetchall()
     finally:
         conn.close()
     keys = ["id", "available_at", "ts_published", "ts_ingested", "source", "title", "url",
             "relevance", "direction", "urgency", "magnitude", "event_type",
-            "timing_quality", "scored_by", "score_version"]
+            "timing_quality", "scored_by", "score_version", "summary_zh",
+            "sentiment_label", "content_hash"]
     return [dict(zip(keys, row, strict=True)) for row in rows]

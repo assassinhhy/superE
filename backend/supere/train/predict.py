@@ -114,7 +114,7 @@ def latest_probs(art: Artifact, bars: data.Bars, funding: data.Funding, metrics_
 
 LEVEL_RULE = ("入场参考 = 决策 K 线收盘价（训练标签用的是下一根开盘，实盘会有开盘跳空偏差）；"
               "止损 = 入场 ∓ k×ATR14；止盈1 = 入场 ± k×ATR14（与训练标签的上下障碍相同，回测口径）；"
-              "止盈2 = 入场 ± 2k×ATR14（未回测，仅参考）。价格点位与杠杆无关。")
+              "止盈2 = 入场 ± 2k×ATR14（未回测）。价格点位与杠杆无关。")
 
 
 def trade_levels(direction_: str, ref: float, atr: float, k_atr: float) -> tuple[dict | None, str | None]:
@@ -177,26 +177,39 @@ def _num(x) -> float | None:
 
 
 NOT_TRADABLE_REASON = ("2026-11-05 训练口径迭代未达标（扣费后期望或折间稳定性不够），"
-                       "此模型仅供参考，不要据此下单")
+                       "不要据此下单")
 
 
 def _base(interval: str) -> dict:
     # Every item says whether the model is tradable. Default: not tradable, until a
     # model whose meta.json has tradable=true (written only after the iteration passed) is served.
     return {"interval": interval, "debug": True, "debug_note": DEBUG_NOTE,
-            "tradable": False, "tradable_status": "未达标/仅参考",
+            "tradable": False, "tradable_status": "未达标",
             "tradable_reason": NOT_TRADABLE_REASON}
 
 
 def _tradable_fields(meta: dict) -> dict:
     ok = meta.get("tradable") is True
     return {"tradable": ok,
-            "tradable_status": "可用（已达标）" if ok else "未达标/仅参考",
+            "tradable_status": "可用（已达标）" if ok else "未达标",
             "tradable_reason": meta.get("tradable_reason") or ("" if ok else NOT_TRADABLE_REASON)}
 
 
 def _fmt(ms: int) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, tz=UTC8).strftime("%Y-%m-%d %H:%M")
+
+
+def _quality_pass(meta: dict) -> bool:
+    """Internal model-quality flag; never rendered as text in the UI."""
+    return str(meta.get("status") or "") == "达标"
+
+
+def _sanitize_forecast(pf: dict | None, meta: dict) -> dict | None:
+    """Keep the old status field as a generic ok flag; never expose quality text."""
+    if isinstance(pf, dict):
+        pf["status"] = "ok"
+        pf["quality_pass"] = _quality_pass(meta)
+    return pf
 
 
 CONTEXT_WINDOW = 20  # bars for the key high and low shown beside the prediction
@@ -399,6 +412,9 @@ class QuantilePredictService:
             if v3_art is not None:
                 now_ms = int(self._clock() * 1000)
                 res = v3.predict_latest(self.data_root, interval, v3_art, now_ms)
+                res["price_forecast"] = _sanitize_forecast(
+                    res.get("price_forecast"), getattr(v3_art, "meta", {}) or {}
+                )
                 res["debug_note"] = "价格区间预测，样本外弱，勿实盘"
                 return res
         except Exception as exc:  # noqa: BLE001 - fall back to an explicit error item
@@ -483,7 +499,8 @@ class QuantilePredictService:
                 "width50_bps": round(float((Q[0, 3] - Q[0, 1]) * 1e4), 4),
                 "width80_bps": round(float((Q[0, 4] - Q[0, 0]) * 1e4), 4),
                 "coverage_ok": True,
-                "status": art.meta.get("status", "仅参考"),
+                "status": "ok",
+                "quality_pass": _quality_pass(art.meta),
                 "explain": explain,
                 "top_features": top,
             }
