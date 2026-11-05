@@ -19,6 +19,7 @@ fill. LightGBM handles NaN.
 from __future__ import annotations
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 from supere.train import features as F
 from supere.train.data import Bars, Funding, Metrics
@@ -87,6 +88,64 @@ def _metrics_lsr_change(bars: Bars, metrics: Metrics) -> tuple[list[str], np.nda
     return names, out
 
 
+REGIME_NAMES = ("htf_adx_14", "atr_pct_rank_200")
+ATR_RANK_WINDOW = 200
+
+
+def adx(bars: Bars, n: int = 14) -> np.ndarray:
+    """Wilder ADX per bar. Recursive and causal: bar ``k`` uses bars ``<= k``. NaN during warm-up."""
+    out = np.full(bars.n, np.nan)
+    if bars.n < 2 * n + 2:
+        return out
+    h, lo, c = bars.h, bars.l, bars.c
+    up = h[1:] - h[:-1]
+    dn = lo[:-1] - lo[1:]
+    plus = np.where((up > dn) & (up > 0), up, 0.0)
+    minus = np.where((dn > up) & (dn > 0), dn, 0.0)
+    tr = np.maximum(h[1:] - lo[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(lo[1:] - c[:-1])))
+    m = tr.shape[0]
+    s_tr = float(np.sum(tr[:n]))
+    s_p = float(np.sum(plus[:n]))
+    s_m = float(np.sum(minus[:n]))
+    dx = np.full(m, np.nan)
+    for k in range(n - 1, m):
+        if k >= n:
+            s_tr = s_tr - s_tr / n + tr[k]
+            s_p = s_p - s_p / n + plus[k]
+            s_m = s_m - s_m / n + minus[k]
+        if s_tr > 0:
+            pdi = 100.0 * s_p / s_tr
+            mdi = 100.0 * s_m / s_tr
+            den = pdi + mdi
+            dx[k] = 100.0 * abs(pdi - mdi) / den if den > 0 else 0.0
+    # ADX: seed with the mean of the first n valid DX values, then Wilder smoothing.
+    first = 2 * n - 2
+    adx_tr = np.full(m, np.nan)
+    if first < m:
+        prev = float(np.mean(dx[n - 1 : first + 1]))
+        adx_tr[first] = prev
+        for k in range(first + 1, m):
+            prev = (prev * (n - 1) + dx[k]) / n
+            adx_tr[k] = prev
+    out[1:] = adx_tr  # tr index k is bar k+1
+    return out
+
+
+def atr_pct_rank(bars: Bars, atr_period: int = 14) -> np.ndarray:
+    """Share of the last ``ATR_RANK_WINDOW`` ATR values (own timeframe, incl. now) that are <= now's ATR."""
+    a = F.atr(bars, atr_period)
+    out = np.full(bars.n, np.nan)
+    if bars.n < ATR_RANK_WINDOW:
+        return out
+    w = sliding_window_view(a, ATR_RANK_WINDOW)
+    cur = a[ATR_RANK_WINDOW - 1 :]
+    full = np.all(np.isfinite(w), axis=1) & np.isfinite(cur)
+    frac = np.full(w.shape[0], np.nan)
+    frac[full] = np.mean(w[full] <= cur[full][:, None], axis=1)
+    out[ATR_RANK_WINDOW - 1 :] = frac
+    return out
+
+
 def build(
     bars: Bars,
     funding: Funding | None,
@@ -97,6 +156,7 @@ def build(
     use_structure: bool = True,
     use_lsr: bool = True,
     use_multi_tf: bool = True,
+    use_regime: bool = False,
 ) -> tuple[list[str], np.ndarray]:
     names, X = F.build(bars, funding, metrics)
     cols = [X]
@@ -124,6 +184,17 @@ def build(
         block = np.full((bars.n, len(MTF_NAMES)), np.nan)
         block[ok] = ctx[j[ok]]
         names += list(MTF_NAMES)
+        cols.append(block)
+    if use_regime:
+        if higher is None:
+            raise ValueError("行情状态特征需要更高周期的 K 线")
+        adx_h = adx(higher)
+        j = _asof(higher.close_time, bars.close_time)
+        block = np.full((bars.n, 2), np.nan)
+        ok = j >= 0
+        block[ok, 0] = adx_h[j[ok]]
+        block[:, 1] = atr_pct_rank(bars)
+        names += list(REGIME_NAMES)
         cols.append(block)
     return names, np.hstack(cols).astype(np.float64)
 

@@ -41,7 +41,7 @@ import lightgbm as lgb
 import numpy as np
 
 from supere.intervals import INTERVAL_MS
-from supere.train import data, splits, trade_features, trade_labels
+from supere.train import data, splits, trade_features, trade_labels, trade_limit
 from supere.train.runner import _window_has_gap
 
 WARMUP = data.WARMUP_BARS
@@ -86,6 +86,7 @@ def build_samples(bars, funding, metrics, higher, interval: str, horizon: int, t
         use_structure=bool(f.get("structure", True)),
         use_lsr=bool(f.get("lsr_oi", True)),
         use_multi_tf=bool(f.get("multi_tf", True)),
+        use_regime=bool(f.get("regime", False)),
     )
     setup = cfg.get("setup")
     lmask = smask = None
@@ -97,15 +98,30 @@ def build_samples(bars, funding, metrics, higher, interval: str, horizon: int, t
         names = names + s_names
         X = np.hstack([X, s_block])
 
-    tl = trade_labels.build(bars, horizon, tp_r, float(cfg.get("k_sl", 1.0)), 14, funding)
+    lab = cfg.get("label") or {"mode": "market"}
+    if lab.get("mode", "market") == "limit":
+        tl = trade_limit.build(
+            bars, horizon, tp_r, k_sl=float(cfg.get("k_sl", 1.0)), pb_atr=float(lab["pb_atr"]),
+            wait=int(lab["wait"]), tp1_r=float(lab.get("tp1_r", 1.0)), tp1_frac=float(lab.get("tp1_frac", 0.5)),
+            funding=funding)
+    else:
+        tl = trade_labels.build(bars, horizon, tp_r, float(cfg.get("k_sl", 1.0)), 14, funding)
     rows = tl.idx
     keep = rows >= WARMUP
     req = trade_features.required_columns(names)
     keep &= np.all(np.isfinite(X[rows][:, req]), axis=1)
     gaps = data.gap_after(bars)
     keep &= ~_window_has_gap(gaps, rows, horizon)
+    if cfg.get("min_entry_ms") is not None and rows.shape[0]:
+        # Training-range restriction (e.g. 2022+): drop samples whose entry is before the start.
+        keep &= bars.open_time[rows + 1] >= int(cfg["min_entry_ms"])
     pos = np.nonzero(keep)[0]
     idx = rows[pos]
+    # Regime gate (fixed before the run, not tuned): higher-timeframe ADX must reach the minimum.
+    regime_ok = None
+    gate_cfg = cfg.get("regime_gate") or {}
+    if "htf_adx_min" in gate_cfg:
+        regime_ok = X[:, names.index("htf_adx_14")] >= float(gate_cfg["htf_adx_min"])  # NaN -> False
     samples = {
         "names": names,
         "idx": idx,
@@ -120,6 +136,9 @@ def build_samples(bars, funding, metrics, higher, interval: str, horizon: int, t
     }
     for name, so in tl.sides.items():
         mask_all = lmask if name == "long" else smask
+        gate = (mask_all[idx].copy() if mask_all is not None else np.ones(idx.shape[0], dtype=bool))
+        if regime_ok is not None:
+            gate &= regime_ok[idx]
         samples["sides"][name] = {
             "y": so.y[pos],
             "net_taker": so.net_taker[pos],
@@ -128,8 +147,11 @@ def build_samples(bars, funding, metrics, higher, interval: str, horizon: int, t
             "outcome": so.outcome[pos],
             "exit_bar": so.exit_bar[pos],
             "d": so.side,
-            # Candidate gate: all True when no setup is configured.
-            "mask": (mask_all[idx].copy() if mask_all is not None else np.ones(idx.shape[0], dtype=bool)),
+            # Candidate gate: setup and regime gates; all True when neither is configured.
+            "mask": gate,
+            # Limit-entry labels only: unfilled candidates are not trades; trades enter at the fill bar.
+            "filled": so.filled[pos] if so.filled is not None else None,
+            "fill_bar": so.fill_bar[pos] if so.fill_bar is not None else None,
         }
     if setup:
         samples["setup_rate"] = {nm: float(np.mean(v["mask"])) for nm, v in samples["sides"].items()}
@@ -155,9 +177,17 @@ def _label_stats(tl: trade_labels.TradeLabels, pos: np.ndarray) -> dict:
 
 # ---------------------------------------------------------------- model
 
-def fit_binary(x: np.ndarray, y: np.ndarray, mcfg: dict):
-    if np.unique(y).shape[0] < 2:
-        return None
+class _SeedEnsemble:
+    """Mean of several LightGBM models that differ only in the random seed (plan 5, batch 2)."""
+
+    def __init__(self, models: list):
+        self.models = models
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        return np.mean([m.predict_proba(x) for m in self.models], axis=0)
+
+
+def _fit_one(x: np.ndarray, y: np.ndarray, mcfg: dict, seed: int):
     model = lgb.LGBMClassifier(
         objective="binary",
         n_estimators=int(mcfg["n_estimators"]),
@@ -168,12 +198,20 @@ def fit_binary(x: np.ndarray, y: np.ndarray, mcfg: dict):
         subsample_freq=1,
         colsample_bytree=float(mcfg["colsample_bytree"]),
         reg_lambda=float(mcfg.get("reg_lambda", 0.0)),
-        random_state=int(mcfg["seed"]),
+        random_state=seed,
         n_jobs=int(mcfg["n_jobs"]),
         verbose=-1,
     )
     model.fit(x, y)
     return model
+
+
+def fit_binary(x: np.ndarray, y: np.ndarray, mcfg: dict):
+    if np.unique(y).shape[0] < 2:
+        return None
+    seeds = [int(s) for s in (mcfg.get("seeds") or [mcfg["seed"]])]
+    models = [_fit_one(x, y, mcfg, s) for s in seeds]
+    return models[0] if len(models) == 1 else _SeedEnsemble(models)
 
 
 def choose_cutoff(p_valid: np.ndarray, net_valid: np.ndarray, q_grid, min_n: int):
@@ -210,7 +248,12 @@ def _fold_trades(samples, te: np.ndarray, cand: dict, probs: dict, fold: int) ->
         else:
             name = "long" if c_l else "short"
         so = samples["sides"][name]
-        entry_bar = int(idx[pos]) + 1
+        if so.get("filled") is not None:
+            if not so["filled"][pos]:
+                continue  # limit never filled: not a trade
+            entry_bar = int(so["fill_bar"][pos])
+        else:
+            entry_bar = int(idx[pos]) + 1
         if entry_bar <= busy:
             continue
         ex = int(so["exit_bar"][pos])
@@ -312,8 +355,10 @@ def summarize(trades: list[dict]) -> dict:
     }
 
 
-def check_targets(interval: str, pooled: dict, folds: list[dict], n_folds: int) -> dict:
-    need_trades = 30 if interval == "4h" else 100
+def check_targets(interval: str, pooled: dict, folds: list[dict], n_folds: int,
+                  need_trades: int | None = None) -> dict:
+    if need_trades is None:
+        need_trades = 30 if interval == "4h" else 100
     pos_folds = sum(1 for f in folds if f.get("mean_net_R_taker") is not None and f["mean_net_R_taker"] > 0)
     need_pos = int(np.ceil(0.8 * n_folds))
     pf = pooled.get("profit_factor")
@@ -359,8 +404,10 @@ def walk_forward(samples, horizon: int, cfg: dict, cv_end: int, interval: str) -
              f"（{_side_note(res['info'])}）")
     _log(f"  {interval} walk-forward 用时 {time.time() - t0:.0f}s")
     pooled = summarize(trades_all)
+    need = (cfg.get("need_trades") or {}).get(interval)
     return {"folds": folds_out, "pooled": pooled, "trades": trades_all,
-            "targets": check_targets(interval, pooled, folds_out, n_folds)}
+            "targets": check_targets(interval, pooled, folds_out, n_folds,
+                                     None if need is None else int(need))}
 
 
 def holdout(samples, horizon: int, cfg: dict, cv_end: int, interval: str) -> dict:

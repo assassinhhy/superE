@@ -48,6 +48,9 @@ class SideOutcome:
     net_maker: np.ndarray  # R, maker entry and taker exit, after funding
     outcome: np.ndarray  # int8: +1 target, -1 stop, 0 timeout
     exit_bar: np.ndarray  # int64 bar whose close (or fill) ends the trade
+    # Limit-entry labels only (trade_limit): fill flag and fill bar. None for market-entry labels.
+    filled: np.ndarray | None = None
+    fill_bar: np.ndarray | None = None
 
     @property
     def y(self) -> np.ndarray:
