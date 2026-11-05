@@ -19,6 +19,7 @@ service can use them without touching the database or an API key.
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -67,12 +68,18 @@ class AltData:
     dvol_z30: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
     macro_time: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
     macro_code: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
+    ob_minute_ms: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
+    ob_feature_names: tuple[str, ...] = field(default_factory=tuple)
+    ob_X: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float64))
 
     def has_dvol(self) -> bool:
         return self.dvol_available.shape[0] > 0
 
     def has_macro(self) -> bool:
         return self.macro_time.shape[0] > 0
+
+    def has_ob(self) -> bool:
+        return self.ob_minute_ms.shape[0] > 0 and self.ob_X.shape[1] > 0
 
 
 def load_dvol_csv(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -126,8 +133,57 @@ def load_macro_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return (np.asarray(times, dtype=np.int64)[order], np.asarray(codes, dtype=np.int64)[order])
 
 
+_OB_CACHE: dict[str, tuple[np.ndarray, tuple[str, ...], np.ndarray]] = {}
+
+
+def load_ob_features(data_root: Path) -> tuple[np.ndarray, tuple[str, ...], np.ndarray]:
+    key = str(Path(data_root).resolve())
+    cached = _OB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    root = Path(data_root) / "features" / "ob_1m" / "um" / "ETHUSDT"
+    empty = (np.zeros(0, dtype=np.int64), tuple(), np.zeros((0, 0), dtype=np.float64))
+    if not root.exists():
+        _OB_CACHE[key] = empty
+        return empty
+    files = sorted(root.glob("date=*/part-*.parquet"))
+    if not files:
+        _OB_CACHE[key] = empty
+        return empty
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except Exception:
+        _OB_CACHE[key] = empty
+        return empty
+    try:
+        tables = [pq.read_table(p) for p in files]
+        table = pa.concat_tables(tables)
+    except Exception:
+        _OB_CACHE[key] = empty
+        return empty
+    if "minute_ms" not in table.column_names:
+        _OB_CACHE[key] = empty
+        return empty
+    minute_ms = np.asarray(table["minute_ms"].to_numpy(zero_copy_only=False), dtype=np.int64)
+    names = tuple(c for c in table.column_names if c != "minute_ms")
+    if not names:
+        _OB_CACHE[key] = empty
+        return empty
+    order = np.argsort(minute_ms, kind="stable")
+    minute_ms = minute_ms[order]
+    cols = []
+    for name in names:
+        arr = np.asarray(table[name].to_numpy(zero_copy_only=False), dtype=np.float64)
+        cols.append(arr[order])
+    X = np.column_stack(cols).astype(np.float64)
+    result = (minute_ms, names, X)
+    _OB_CACHE[key] = result
+    return result
+
+
 def load_alt(data_root: Path, groups: set[str], btc: data.Bars | None = None,
-             dvol_file: str | None = None, macro_file: str | None = None) -> AltData:
+              dvol_file: str | None = None, macro_file: str | None = None) -> AltData:
     root = Path(data_root)
     dvol_path = Path(dvol_file) if dvol_file else root / "dvol_ETH_1h.csv"
     macro_path = Path(macro_file) if macro_file else root / "macro_calendar.csv"
@@ -136,6 +192,11 @@ def load_alt(data_root: Path, groups: set[str], btc: data.Bars | None = None,
         out.dvol_available, out.dvol_close, out.dvol_z30 = load_dvol_csv(dvol_path)
     if "macro" in groups:
         out.macro_time, out.macro_code = load_macro_csv(macro_path)
+    if "ob" in groups:
+        minute_ms, names, X = load_ob_features(root)
+        out.ob_minute_ms = minute_ms
+        out.ob_feature_names = names
+        out.ob_X = X
     return out
 
 
@@ -308,6 +369,23 @@ def macro_columns(decision_ms: np.ndarray, horizon_ms: int, alt: AltData) -> dic
     return cols
 
 
+def ob_columns(decision_ms: np.ndarray, alt: AltData) -> dict[str, np.ndarray]:
+    n = int(decision_ms.shape[0])
+    names = alt.ob_feature_names
+    out = {name: np.full(n, np.nan, dtype=np.float64) for name in names}
+    if not alt.has_ob():
+        return out
+    avail = alt.ob_minute_ms + 60_000
+    j = np.searchsorted(avail, np.asarray(decision_ms, dtype=np.int64), side="right") - 1
+    ok = j >= 0
+    if not ok.any():
+        return out
+    idx = j[ok]
+    for ki, name in enumerate(names):
+        out[name][ok] = alt.ob_X[idx, ki]
+    return out
+
+
 def build_columns(bars: data.Bars, decision_ms: np.ndarray, interval_ms: int, sig: np.ndarray,
                   alt: AltData | None, groups: set[str]) -> dict[str, np.ndarray]:
     cols: dict[str, np.ndarray] = {}
@@ -319,4 +397,6 @@ def build_columns(bars: data.Bars, decision_ms: np.ndarray, interval_ms: int, si
         cols.update(dvol_columns(decision_ms, interval_ms, sig, alt))
     if "macro" in groups:
         cols.update(macro_columns(decision_ms, interval_ms, alt))
+    if "ob" in groups:
+        cols.update(ob_columns(decision_ms, alt))
     return cols

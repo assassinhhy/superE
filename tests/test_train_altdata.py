@@ -21,7 +21,7 @@ N = 4000
 def test_feature_groups_parsing_and_validation():
     assert feature_groups(QConfig(interval="1h")) == set()
     assert feature_groups(QConfig(interval="1h", feature_groups="btc, dvol")) == {"btc", "dvol"}
-    assert feature_groups(default_config("1h", {"feature_groups": "all"})) == {"btc", "dvol", "macro"}
+    assert feature_groups(default_config("1h", {"feature_groups": "all"})) == {"btc", "dvol", "macro", "ob"}
     try:
         default_config("1h", {"feature_groups": "btc,foo"})
     except QuantileError:
