@@ -305,9 +305,14 @@ function onLive() {
     seenClosed.add(key);
     schedule(carry(raw));
   }
-  const forming = state.forming.find(
+  // pick newest open_time; stale forming leftovers from LiveHub must not freeze the chart
+  const formingCandidates = state.forming.filter(
     (bar) => bar.market === props.market && bar.interval === props.interval && bar.closed === false,
   );
+  const forming = formingCandidates.reduce((best, bar) => {
+    if (!best) return bar;
+    return (bar.open_time || 0) >= (best.open_time || 0) ? bar : best;
+  }, null);
   if (forming) schedule(carry(forming));
 }
 
