@@ -634,6 +634,9 @@ class Database:
             "content_hash",
             "summary_zh",
             "sentiment_label",
+            "reason_zh",
+            "importance",
+            "impact_zh",
         ]
         values = [fields.get(name) for name in columns]
         placeholders = ",".join("?" for _ in columns)
@@ -650,6 +653,7 @@ class Database:
             "score_json", "status", "available_at", "timing_quality",
             "direction_score", "urgency", "magnitude", "event_type", "confidence",
             "score_version", "content_hash", "summary_zh", "sentiment_label",
+            "reason_zh", "importance", "impact_zh",
         }
         cols = [name for name in fields if name in allowed]
         if not cols:
@@ -678,6 +682,16 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM news WHERE content_hash=? AND score_version=? "
             "AND scored_by IS NOT NULL AND scored_by NOT IN ('', 'pending') "
+            "ORDER BY id DESC LIMIT 1",
+            (content_hash, score_version),
+        ).fetchone()
+
+    def news_llm_hit(self, content_hash: str, score_version: str) -> sqlite3.Row | None:
+        """A finished model score. Rule fallbacks are excluded so the next refresh can retry."""
+        return self.conn.execute(
+            "SELECT * FROM news WHERE content_hash=? AND score_version=? "
+            "AND scored_by IN ('llm', 'deepseek') "
+            "AND summary_zh IS NOT NULL AND summary_zh != '' "
             "ORDER BY id DESC LIMIT 1",
             (content_hash, score_version),
         ).fetchone()

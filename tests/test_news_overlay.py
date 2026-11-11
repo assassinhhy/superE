@@ -246,7 +246,7 @@ def test_rss_parser_extracts_eth_items_only():
       <description>Nothing relevant here.</description>
       <pubDate>Wed, 05 Nov 2026 10:00:00 GMT</pubDate></item>
     </channel></rss>"""
-    # 用与 RSS pubDate 同一时刻的 now，避免 MAX_AGE_MS（48 小时）随真实时间过期。
+    # 用与 RSS pubDate 同一时刻的 now，避免 MAX_AGE_MS（24 小时）随真实时间过期。
     from datetime import datetime, timezone
 
     now_ms = int(datetime(2026, 11, 5, 10, 5, tzinfo=timezone.utc).timestamp() * 1000)

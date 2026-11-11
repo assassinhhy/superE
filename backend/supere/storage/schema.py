@@ -193,7 +193,10 @@ CREATE TABLE IF NOT EXISTS news (
   score_version TEXT,
   content_hash TEXT,
   summary_zh TEXT,
-  sentiment_label TEXT
+  sentiment_label TEXT,
+  reason_zh TEXT,
+  importance INTEGER,
+  impact_zh TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_url_hash ON news(url_hash);
@@ -273,6 +276,9 @@ NEWS_ADDED_COLUMNS = {
     "content_hash": "TEXT",
     "summary_zh": "TEXT",
     "sentiment_label": "TEXT",
+    "reason_zh": "TEXT",
+    "importance": "INTEGER",
+    "impact_zh": "TEXT",
 }
 
 

@@ -45,11 +45,11 @@ export const api = {
   catalog: () => getJSON("/api/catalog"),
   settings: () => getJSON("/api/settings"),
   signals: () => getJSON("/api/signals"),
-  // Forecasts are only fetched by the explicit 预测 button. POST runs the
-  // click-time news fetch/score/overlay on the server; there is no polling.
+  // Forecasts are only fetched by the explicit 预测 button.
   predictOnClick: () => getJSON("/api/predict", { method: "POST" }),
-  // Cached news for the panel. Reading it never runs a prediction.
+  // Cached news. GET never fetches and never runs a prediction.
   news: (params) => getJSON(`/api/news?${query(params || {})}`),
+  refreshNews: () => getJSON("/api/news/refresh", { method: "POST" }),
   aggregate: (interval, bars) =>
     getJSON(`/api/checks/aggregate?${query({ interval, bars })}`),
 };

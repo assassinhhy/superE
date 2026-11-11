@@ -1,10 +1,20 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { state } from "../live.js";
 import { api } from "../api.js";
 import { PREDICT_INTERVALS, formatUtc8, formatUtc8Clock } from "../indicators.js";
 import { forecastRows } from "../forecastRows.js";
-import { formatAlert, formatNewsRows, summaryLine } from "../news.js";
+import {
+  NEWS_FILTERS,
+  NEWS_POLL_MS,
+  filterNews,
+  formatNewsRows,
+  importantRows,
+  layoutNews,
+  refreshButtonState,
+  refreshCountdown,
+  summaryHeadline,
+} from "../news.js";
 import { createPredictController } from "../predictController.js";
 
 const props = defineProps({
@@ -54,19 +64,62 @@ const newsError = computed(() => view.value.newsError);
 const forecast = computed(() => forecastRows(Object.values(view.value.predictions), PREDICT_INTERVALS));
 const forecastAsof = computed(() => forecast.value.find((row) => row.asof)?.asof || "");
 
-const newsRows = computed(() => formatNewsRows(view.value.news.items));
-const newsLine = computed(() => summaryLine(view.value.news.summary));
-const alert = computed(() => formatAlert(view.value.news.alert));
+const nowMs = ref(Date.now());
+const newsFilter = ref("全部");
+const pageLimit = ref(15);
+const showOlder = ref(false);
+let newsPoll = 0;
+let clockTick = 0;
+
+const newsRows = computed(() => formatNewsRows(view.value.news.items, nowMs.value));
+const filteredRows = computed(() => filterNews(newsRows.value, newsFilter.value));
+const laidOut = computed(() => layoutNews(filteredRows.value, nowMs.value, {
+  limit: pageLimit.value,
+  showOlder: showOlder.value,
+}));
+const highlightRows = computed(() => importantRows(newsRows.value));
+const headline = computed(() => summaryHeadline(view.value.news.summary));
+const prose1 = computed(() => view.value.news.summary?.prose_1h || "");
+const prose24 = computed(() => view.value.news.summary?.prose_24h || "");
 const newsAggregate = computed(() => view.value.news.aggregate || {});
 const sourceEntries = computed(() => Object.entries(view.value.news.sources || {}));
+const scoreCounts = computed(() => view.value.news.scoreCounts || null);
+const buttonState = computed(() => refreshButtonState({
+  refreshing: view.value.news.refreshing,
+  cooldownUntilMs: view.value.news.cooldownUntilMs,
+  cooldownRemainingSec: view.value.news.cooldownRemainingSec,
+  nowMs: nowMs.value,
+}));
+const countdownText = computed(() => refreshCountdown(view.value.news.nextRefreshAt, nowMs.value));
+const lastRefreshText = computed(() => {
+  const ts = view.value.news.lastRefreshAt;
+  return ts ? formatUtc8(ts) : "尚未刷新";
+});
 
 function runPredict() {
   controller.run();
 }
 
+function refreshNews() {
+  controller.refreshNews();
+}
+
+function showMoreNews() {
+  pageLimit.value += 15;
+}
+
+function revealOlderNews() {
+  showOlder.value = true;
+}
+
 onMounted(() => {
-  // Cache only: no forecast call, no timer.
   controller.loadCachedNews();
+  newsPoll = setInterval(() => controller.loadCachedNews(), NEWS_POLL_MS);
+  clockTick = setInterval(() => { nowMs.value = Date.now(); }, 1000);
+});
+onUnmounted(() => {
+  clearInterval(newsPoll);
+  clearInterval(clockTick);
 });
 
 function num(value, digits = 2) {
@@ -123,9 +176,9 @@ const kinds = {
       <h2>预测区间</h2>
       <p class="debug-banner">调试预测，样本外弱，勿实盘</p>
       <button type="button" class="predict-btn" :disabled="predicting" @click="runPredict">
-        {{ predicting ? "抓取新闻并预测…" : "预测" }}
+        {{ predicting ? "预测中…" : "预测" }}
       </button>
-      <p class="fine">只有点击「预测」才会依次抓取当前 ETH 新闻、打分并运行模型；页面不会自动预测。</p>
+      <p class="fine">只有点击「预测」才会运行模型。消息用缓存；缓存超过 1 小时才会在这次点击时再抓一次。</p>
       <p v-if="predictError" class="fine down">预测失败：{{ predictError }}（保留上一次结果）</p>
       <p v-if="!hasRun && !predictError" class="muted">点击上方按钮后显示结果。</p>
 
@@ -199,47 +252,73 @@ const kinds = {
     </section>
 
     <section>
-      <h2>新闻与异常</h2>
-      <p v-if="newsError" class="fine down">缓存新闻读取失败：{{ newsError }}</p>
+      <h2>以太坊消息</h2>
+      <p v-if="newsError" class="fine down">消息读取失败：{{ newsError }}</p>
 
-      <div class="news-alert" :class="alert.level">
-        <div class="news-alert-head">
-          <strong>{{ alert.title }}</strong>
-          <span class="news-alert-level">{{ alert.urgency }}紧急</span>
-        </div>
-        <p v-if="alert.what"><b>发生了什么：</b>{{ alert.what }}</p>
-        <p v-if="alert.why"><b>为何影响 ETH：</b>{{ alert.why }}</p>
-        <p v-if="alert.consistency"><b>方向一致性：</b>{{ alert.consistency }}</p>
-        <p v-if="alert.sources || alert.recency"><b>来源与时效：</b>{{ alert.sources }}<template v-if="alert.sources && alert.recency">，</template>{{ alert.recency }}</p>
-        <p><b>关注窗口：</b>{{ alert.watchWindow }}</p>
-        <p v-if="alert.uncertain" class="fine">{{ alert.note || "部分条目只有标题和规则打分，细节有限。" }}</p>
+      <p class="news-summary">{{ headline }}</p>
+      <p v-if="prose1" class="news-prose">{{ prose1 }}</p>
+      <p v-if="prose24" class="news-prose">{{ prose24 }}</p>
+      <div class="news-toolbar">
+        <span class="fine">上次刷新 {{ lastRefreshText }}</span>
+        <span class="fine">下次刷新 {{ countdownText }}</span>
+        <button type="button" class="news-refresh" :disabled="buttonState.disabled" @click="refreshNews">
+          <i v-if="buttonState.spinning" class="news-spin"></i>
+          {{ buttonState.label }}
+        </button>
+      </div>
+      <div class="news-filters">
+        <button
+          v-for="name in NEWS_FILTERS"
+          :key="name"
+          type="button"
+          :class="{ on: newsFilter === name }"
+          @click="newsFilter = name"
+        >
+          {{ name }}
+        </button>
       </div>
 
-      <p class="news-summary">{{ newsLine || "暂无新闻摘要" }}</p>
-      <p v-if="!newsRows.length" class="muted">
-        还没有新闻。面板先读缓存；点击「预测」会现场抓取最新 ETH 相关消息。
-      </p>
+      <div class="news-highlights" :class="{ empty: !highlightRows.length }">
+        <h3>重要消息</h3>
+        <p v-if="!highlightRows.length" class="muted">暂无重要消息</p>
+        <ul v-else>
+          <li v-for="item in highlightRows" :key="'h-' + (item.id || item.contentHash || item.title)">
+            <span class="news-dir" :class="item.directionClass">{{ item.directionLabel }}</span>
+            <p>{{ item.impact || item.summary }}</p>
+          </li>
+        </ul>
+      </div>
+
+      <p v-if="!filteredRows.length" class="muted">最近 24 小时没有符合筛选的以太坊消息。</p>
       <ul v-else class="news-feed">
         <li
-          v-for="item in newsRows"
+          v-for="item in laidOut.rows"
           :key="item.id || item.contentHash || item.title"
           class="news-item"
-          :class="{ urgent: item.urgent }"
+          :class="{ urgent: item.important }"
         >
-          <div class="news-meta">
-            <span>{{ item.time }}</span>
-            <span class="news-source">{{ item.source }}</span>
+          <div class="news-main" :title="item.reason || undefined">
             <span class="news-dir" :class="item.directionClass">{{ item.directionLabel }}</span>
-            <span>{{ item.urgencyLabel }}紧急</span>
-            <span v-if="item.urgent" class="news-urgent-tag">高紧急</span>
+            <p class="news-summary-text">{{ item.summary }}</p>
           </div>
-          <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
-          <span v-else>{{ item.title }}</span>
-          <p class="news-summary-text">{{ item.summary }}</p>
+          <p class="news-original">
+            <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+            <span v-else>{{ item.title }}</span>
+            <span class="news-source">{{ item.source }}</span>
+            <span class="news-when">{{ item.relative }}</span>
+          </p>
+          <details v-if="item.reason" class="news-reason">
+            <summary>原因</summary>
+            <p>{{ item.reason }}</p>
+          </details>
         </li>
       </ul>
+      <div v-if="laidOut.hiddenRecent || laidOut.olderHidden" class="news-more">
+        <button v-if="laidOut.hiddenRecent" type="button" @click="showMoreNews">更多（还有 {{ laidOut.hiddenRecent }} 条）</button>
+        <button v-if="laidOut.olderHidden" type="button" @click="revealOlderNews">展开 6 小时前的 {{ laidOut.olderCount }} 条</button>
+      </div>
 
-      <details v-if="newsAggregate.u != null || sourceEntries.length" class="explain-fold">
+      <details v-if="newsAggregate.u != null || sourceEntries.length || scoreCounts" class="explain-fold">
         <summary>新闻数值与来源（调试）</summary>
         <div class="explain-line">
           U {{ num(newsAggregate.u, 3) }} · D {{ num(newsAggregate.d, 3) }} · R {{ num(newsAggregate.r, 3) }}
@@ -248,13 +327,16 @@ const kinds = {
           24h 条数 {{ newsAggregate.count || 0 }}；利多/利空/中性 =
           {{ newsAggregate.positive || 0 }}/{{ newsAggregate.negative || 0 }}/{{ newsAggregate.neutral || 0 }}
         </div>
+        <div v-if="scoreCounts" class="explain-line">
+          打分：模型 {{ scoreCounts.llm || 0 }} · 规则 {{ scoreCounts.rule || scoreCounts.failed || 0 }} · 缓存 {{ scoreCounts.cached || 0 }}
+        </div>
         <div v-for="[name, meta] in sourceEntries" :key="name" class="explain-line">
           {{ name }}：{{ meta.ok ? `成功 ${meta.count} 条` : `失败：${meta.error || '未知错误'}` }}
         </div>
         <div v-if="view.news.scorerVersion" class="explain-line">打分版本：{{ view.news.scorerVersion }}</div>
       </details>
 
-      <p class="fine">利多/利空是新闻情绪标签，不代表价格一定跟随。面板先读缓存；点击「预测」才会抓取最新新闻。</p>
+      <p class="fine">每小时整点自动更新，也可以手动刷新。列表每 5 分钟读取一次缓存。</p>
     </section>
 
     <section>

@@ -6,10 +6,15 @@
 // click keeps the previous rows on screen instead of replacing them with blanks.
 
 function emptyNews() {
-  return { items: [], summary: null, alert: null, status: "empty", sources: {}, aggregate: null, scorerVersion: "" };
+  return {
+    items: [], summary: null, alert: null, status: "empty", sources: {}, aggregate: null,
+    scorerVersion: "", lastRefreshAt: null, nextRefreshAt: null, refreshing: false,
+    cooldownRemainingSec: 0, cooldownUntilMs: 0, highlights: [], scoreCounts: null,
+  };
 }
 
-function newsState(payload) {
+function newsState(payload, nowMs = Date.now()) {
+  const remain = Math.max(0, Math.ceil(Number(payload?.cooldown_remaining_s) || 0));
   return {
     items: payload?.items || [],
     summary: payload?.summary || null,
@@ -18,6 +23,13 @@ function newsState(payload) {
     sources: payload?.sources || {},
     aggregate: payload?.aggregate || null,
     scorerVersion: payload?.scorer_version || "",
+    lastRefreshAt: payload?.last_refresh_at ?? null,
+    nextRefreshAt: payload?.next_refresh_at ?? null,
+    refreshing: Boolean(payload?.refreshing),
+    cooldownRemainingSec: remain,
+    cooldownUntilMs: remain > 0 ? nowMs + remain * 1000 : 0,
+    highlights: payload?.highlights || [],
+    scoreCounts: payload?.score_counts || null,
   };
 }
 
@@ -40,11 +52,28 @@ export function createPredictController({ api, intervals, onChange } = {}) {
 
   async function loadCachedNews() {
     try {
-      const payload = await api.news({ limit: 50, since_hours: 72 });
+      const payload = await api.news({ limit: 80, since_hours: 24 });
       update({ news: newsState(payload), newsError: "" });
       return payload;
     } catch (err) {
       update({ newsError: err?.message || String(err) });
+      return null;
+    }
+  }
+
+  async function refreshNews() {
+    if (state.news.refreshing) return null;
+    if (state.news.cooldownUntilMs && Date.now() < state.news.cooldownUntilMs) return null;
+    update({ news: { ...state.news, refreshing: true }, newsError: "" });
+    try {
+      const payload = await api.refreshNews();
+      update({ news: newsState(payload), newsError: "" });
+      return payload;
+    } catch (err) {
+      update({
+        news: { ...state.news, refreshing: false },
+        newsError: err?.message || String(err),
+      });
       return null;
     }
   }
@@ -89,5 +118,5 @@ export function createPredictController({ api, intervals, onChange } = {}) {
     }
   }
 
-  return { state, loadCachedNews, run };
+  return { state, loadCachedNews, refreshNews, run };
 }

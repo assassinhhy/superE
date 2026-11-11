@@ -14,15 +14,18 @@ function files(dir) {
   });
 }
 
-test("SidePanel has no timer and only calls prediction from the click handler", () => {
+test("SidePanel polls cached news and predicts only from the click handler", () => {
   const panel = readFileSync(join(SRC, "components", "SidePanel.vue"), "utf8");
-  assert.ok(!/setInterval|setTimeout/.test(panel));
+  assert.ok(!/setTimeout/.test(panel));
   assert.ok(!/WebSocket/.test(panel));
+  assert.match(panel, /setInterval\(\(\) => controller\.loadCachedNews\(\), NEWS_POLL_MS\)/);
+  assert.ok(!/setInterval\([\s\S]{0,120}predict/.test(panel));
   const mounted = panel.match(/onMounted\(\(\) => \{([\s\S]*?)\}\);/);
   assert.ok(mounted, "onMounted block present");
   assert.match(mounted[1], /loadCachedNews/);
   assert.ok(!/runPredict|predictOnClick|api\.predict/.test(mounted[1]));
   assert.match(panel, /@click="runPredict"/);
+  assert.match(panel, /@click="refreshNews"/);
 });
 
 test("the controller never calls prediction from its news path", () => {
