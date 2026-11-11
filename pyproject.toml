@@ -8,10 +8,13 @@ dependencies = [
   "duckdb>=1.1",
   "fastapi>=0.115",
   "httpx>=0.28",
+  "lightgbm>=4.5",
+  "numpy>=2.1",
   "portalocker>=2.10",
   "pyarrow>=18",
   "pydantic>=2.9",
   "pywebview>=6.2.1",
+  "scikit-learn>=1.5",
   "uvicorn>=0.32",
   "websockets==17.4",
 ]

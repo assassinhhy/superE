@@ -182,7 +182,18 @@ CREATE TABLE IF NOT EXISTS news (
   scored_by TEXT,
   score_json TEXT,
   user_label INTEGER,
-  status TEXT NOT NULL DEFAULT 'new'
+  status TEXT NOT NULL DEFAULT 'new',
+  available_at INTEGER,
+  timing_quality TEXT,
+  direction_score REAL,
+  urgency REAL,
+  magnitude REAL,
+  event_type TEXT,
+  confidence REAL,
+  score_version TEXT,
+  content_hash TEXT,
+  summary_zh TEXT,
+  sentiment_label TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_url_hash ON news(url_hash);
@@ -242,7 +253,33 @@ CREATE TABLE IF NOT EXISTS fear_greed (
 """
 
 
+def _ensure_columns(conn, table: str, columns: dict[str, str]) -> None:
+    """Add columns to an existing database (``CREATE TABLE IF NOT EXISTS`` does not)."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+NEWS_ADDED_COLUMNS = {
+    "available_at": "INTEGER",
+    "timing_quality": "TEXT",
+    "direction_score": "REAL",
+    "urgency": "REAL",
+    "magnitude": "REAL",
+    "event_type": "TEXT",
+    "confidence": "REAL",
+    "score_version": "TEXT",
+    "content_hash": "TEXT",
+    "summary_zh": "TEXT",
+    "sentiment_label": "TEXT",
+}
+
+
 def init_schema(conn) -> None:
     conn.executescript(SCHEMA_SQL)
+    _ensure_columns(conn, "news", NEWS_ADDED_COLUMNS)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_news_available ON news(available_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_news_content ON news(content_hash)")
     conn.execute("PRAGMA user_version=1")
     conn.commit()
