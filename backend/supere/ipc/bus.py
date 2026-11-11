@@ -88,17 +88,14 @@ class LiveHub:
             bar = message.get("bar")
             if not bar:
                 return
-            key = (bar.get("market"), bar.get("symbol"), bar.get("interval"), bar.get("open_time"))
+            # Drop any prior forming bar for the same market/symbol/interval
+            # (not only the same open_time). Missed closed events used to leave
+            # zombies that made the chart look frozen.
+            msi = (bar.get("market"), bar.get("symbol"), bar.get("interval"))
             self.forming = [
                 item
                 for item in self.forming
-                if (
-                    item.get("market"),
-                    item.get("symbol"),
-                    item.get("interval"),
-                    item.get("open_time"),
-                )
-                != key
+                if (item.get("market"), item.get("symbol"), item.get("interval")) != msi
             ]
             if not message.get("closed"):
                 self.forming.append(bar)
