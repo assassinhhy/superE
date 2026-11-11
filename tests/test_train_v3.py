@@ -175,6 +175,34 @@ def test_v3_fit_and_inference_contract(tmp_path: Path):
     assert pf["p10"] <= pf["p25"] <= pf["median"] <= pf["p75"] <= pf["p90"]
 
 
+def test_har_ex_sigma_round_trips_through_metadata(tmp_path: Path):
+    """The expanded HAR sigma is causal, finite, and reproducible from meta.json."""
+    db_path = tmp_path / "superE.sqlite"
+    _make_market_db(db_path, n_5m=4000)
+    cfg = quantile_v3.default_config("5m", {
+        "snapshot_ms": None, "limit_bars": None, "features": "rv_season",
+        "sigma_model": "har_ex", "n_estimators": 8, "n_jobs": 2,
+    })
+    S = quantile_v3.load_samples(cfg, db_path, tmp_path)
+    train = np.arange(S.m, dtype=np.int64)
+    fit = quantile_v3.fit_sigma(S, train, cfg)
+    assert fit.kind == "har_ex" and fit.coef is not None and fit.feature_names
+    sigma = quantile_v3.predict_sigma(S, fit, cfg)
+    assert sigma.shape[0] == S.bars_n
+    assert np.all(np.isfinite(sigma[S.idx])) and np.all(sigma[S.idx] > 0)
+    # Save/load/inference must reproduce the sigma from meta.json alone.
+    quantile_v3.save_artifacts(tmp_path, S, cfg, quantile_v3.fit_block(S, train, cfg),
+                               {"status": "仅参考"}, False)
+    art = quantile_v3.load_v3(tmp_path, "5m")
+    assert art is not None and art.meta["sigma"]["kind"] == "har_ex"
+    now_ms = int(S.decision_ms[-1]) + 1
+    out = quantile_v3.predict_latest(tmp_path, "5m", art, now_ms)
+    pf = out["price_forecast"]
+    assert pf is not None
+    assert pf["p10"] <= pf["p25"] <= pf["median"] <= pf["p75"] <= pf["p90"]
+    assert all(np.isfinite(pf[k]) for k in ("p10", "p25", "median", "p75", "p90"))
+
+
 def test_news_api_payload(tmp_path: Path):
     from supere.storage.db import Database
     from supere.train.serve import _news_payload
