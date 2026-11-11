@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 LABELS = ("利多", "利空", "中性")
+# Below this, a scored item leaves the main list and sits in the collapsed "其它" group.
+PANEL_RELEVANCE_MIN = 0.4
+_MARKET_TOKENS = {
+    "eth", "ethereum", "ether", "vitalik", "ethusdt",
+    "bitcoin", "btc", "etf", "liquidation", "liquidations",
+    "fed", "fomc", "cpi", "inflation", "usd", "dollar", "dxy",
+}
+_MARKET_PHRASES = ("以太坊", "以太币", "比特币", "美联储", "通胀", "美元", "清算", "资金流")
+
+
+def market_channel(title: str, body: str = "") -> bool:
+    """ETH, macro (Fed / inflation / USD) or broad crypto (BTC, ETF flows, liquidations)."""
+    text = f"{title} {body}".lower()
+    tokens = set(re.findall(r"[a-z0-9]+|[一-鿿]+", text))
+    if tokens & _MARKET_TOKENS:
+        return True
+    return any(phrase in text for phrase in _MARKET_PHRASES)
+
+
+def relevance_of(item: dict) -> float:
+    for key in ("relevance", "eth_relevance"):
+        try:
+            value = item.get(key)
+            if value is None:
+                continue
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number == number:
+            return number
+    return 0.0
+
+
+def in_main_feed(item: dict) -> bool:
+    """Main list vs collapsed 其它. Low LLM relevance stays out of the overlay too."""
+    return relevance_of(item) >= PANEL_RELEVANCE_MIN
 
 
 def label_of(item: dict) -> str:

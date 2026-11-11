@@ -9,7 +9,7 @@ function emptyNews() {
   return {
     items: [], summary: null, alert: null, status: "empty", sources: {}, aggregate: null,
     scorerVersion: "", lastRefreshAt: null, nextRefreshAt: null, refreshing: false,
-    cooldownRemainingSec: 0, cooldownUntilMs: 0, highlights: [], scoreCounts: null,
+    cooldownRemainingSec: 0, cooldownUntilMs: 0, highlights: [], other: [], scoreCounts: null,
   };
 }
 
@@ -29,6 +29,7 @@ function newsState(payload, nowMs = Date.now()) {
     cooldownRemainingSec: remain,
     cooldownUntilMs: remain > 0 ? nowMs + remain * 1000 : 0,
     highlights: payload?.highlights || [],
+    other: payload?.other || [],
     scoreCounts: payload?.score_counts || null,
   };
 }

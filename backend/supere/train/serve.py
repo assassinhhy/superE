@@ -41,7 +41,7 @@ from supere.news import clicklog, live, overlay
 from supere.news.refresh import NewsRefresher, next_hour_ms
 from supere.news.scoring import (content_hash, list_news, rule_score, rule_summary_zh,
                                  score_items, score_version, sentiment_label)
-from supere.news.summary import compose_summary, highlight_items
+from supere.news.summary import compose_summary, highlight_items, in_main_feed
 from supere.train.config import PRODUCT_INTERVALS, TRAINABLE_INTERVALS
 from supere.train.predict import QuantilePredictService as PredictService
 from supere.timeutil import format_utc8
@@ -99,11 +99,15 @@ def _news_payload(data_root: Path, limit: int, since_hours: int,
     meta = dict(meta or {})
     window = min(int(since_hours), 24)
     if items_override is not None:
-        rows = items_override
+        # This refresh's rows. Drop historical GDELT even if a caller mixed it in.
+        rows = [row for row in items_override if str(row.get("source") or "") != "gdelt"]
     else:
         since_ms = now_ms - window * 3_600_000
         try:
-            rows = list_news(Path(data_root) / "superE.sqlite", limit=limit, since_ms=since_ms)
+            rows = list_news(
+                Path(data_root) / "superE.sqlite", limit=limit, since_ms=since_ms,
+                sources=tuple(sorted(live.PANEL_SOURCES)),
+            )
         except Exception as exc:  # noqa: BLE001 - news is independent of the forecast
             return {"items": [], "summary": None, "alert": None, "highlights": [],
                     "status": "error", "message": f"{type(exc).__name__}: {exc}",
@@ -112,16 +116,19 @@ def _news_payload(data_root: Path, limit: int, since_hours: int,
                     "refreshing": bool(meta.get("refreshing")),
                     "cooldown_remaining_s": int(meta.get("cooldown_remaining_s") or 0),
                     "sources": sources if sources is not None else (meta.get("sources") or {})}
-    items = [_display_item(dict(row)) for row in rows]
-    items.sort(key=lambda row: (row.get("ts_published") or row.get("available_at") or 0,
+    shown = [_display_item(dict(row)) for row in rows]
+    shown.sort(key=lambda row: (row.get("ts_published") or row.get("available_at") or 0,
                                 row.get("id") or 0), reverse=True)
-    items = items[:limit]
+    shown = shown[:limit]
+    items = [row for row in shown if in_main_feed(row)]
+    other = [row for row in shown if not in_main_feed(row)]
     agg = overlay.aggregate(items, now_ms, 3_600_000)
     digest = meta.get("digest") if isinstance(meta.get("digest"), dict) else None
     summary = compose_summary(items, now_ms, agg["summary"], digest)
     nxt = int(meta.get("next_refresh_at") or next_hour_ms(now_ms))
     return {
         "items": items,
+        "other": other,
         "summary": summary,
         "alert": agg["alert"],
         "highlights": highlight_items(items),
@@ -137,7 +144,7 @@ def _news_payload(data_root: Path, limit: int, since_hours: int,
         "sources": sources if sources is not None else (meta.get("sources") or {}),
         "score_counts": meta.get("score_counts") or {},
         "scorer_version": scorer_version or score_version(),
-        "status": status or ("ok" if items else "empty"),
+        "status": status or ("ok" if (items or other) else "empty"),
         "timezone": "UTC+8",
         "degraded": not bool(items),
         "last_refresh_at": meta.get("last_refresh_at"),

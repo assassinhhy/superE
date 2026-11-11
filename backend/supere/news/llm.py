@@ -43,7 +43,10 @@ SYSTEM_PROMPT = (
     "label（只能是利多、利空、中性之一，相对 ETH）、reason_zh（一句为什么）、"
     "importance（整数 1、2 或 3，3 最可能影响 ETH）、"
     "impact_zh（importance 大于等于 2 时用一句说明发生了什么、对 ETH 可能怎么影响；否则空字符串）、"
-    "direction（-1 到 1，利空为负）、urgency（0 到 1）、relevance（0 到 1，和 ETH 价格的相关程度）。"
+    "direction（-1 到 1，利空为负）、urgency（0 到 1）、relevance（0 到 1）。"
+    "relevance 这样打：直接关于 ETH、以太坊、质押、二层或 Vitalik 用 0.7 以上；"
+    "宏观（美联储、通胀、美元、利率）以及大盘加密（比特币价格、ETF 资金流、清算）用 0.5 到 0.8，这些要保留；"
+    "和 ETH 价格几乎无关的（其它公链八卦、地方新闻、房价、绑架、税务局接受比特币这类）用 0.2 以下。"
 )
 
 DIGEST_SYSTEM = (

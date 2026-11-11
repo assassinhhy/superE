@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+from supere import secrets
 from supere.news import live
+from supere.news.scoring import pending_llm_items
+from supere.news.summary import in_main_feed
 from supere.timeutil import format_utc8
 
 log = logging.getLogger("supere.news.refresh")
@@ -27,6 +30,10 @@ except Exception:  # pragma: no cover - tzdata is present on the runtime image
 
 STALE_MS = 3_600_000
 COOLDOWN_MS = 60_000
+# One batch at a time, then a pause, so backfill does not share the model quota in a burst.
+BACKFILL_BATCH = 8
+BACKFILL_GAP_S = 5.0
+BACKFILL_IDLE_S = 20.0
 
 
 def hour_floor_ms(now_ms: int) -> int:
@@ -215,9 +222,10 @@ class NewsRefresher:
             scored["scored"] = True
             scored["fetched_at"] = self._last_refresh_at
             scored["from_cache"] = False
-            if self._digest_fn and self._items:
+            main_items = [row for row in self._items if str(row.get("source") or "") != "gdelt" and in_main_feed(row)]
+            if self._digest_fn and main_items:
                 try:
-                    digest = self._digest_fn(self._items, int(now_ms))
+                    digest = self._digest_fn(main_items, int(now_ms))
                     if digest:
                         self._digest = digest
                 except Exception:
@@ -279,9 +287,51 @@ class NewsRefresher:
             daemon=True,
         )
         self._thread.start()
+        self._backfill_thread = threading.Thread(
+            target=self._backfill_loop,
+            name="supere-news-backfill",
+            daemon=True,
+        )
+        self._backfill_thread.start()
+
+    def backfill_once(self) -> int:
+        """Score one batch of panel rows still on the rule fallback. Returns how many were sent.
+
+        Skips GDELT and anything already scored by the model. Does not run while a
+        refresh is in flight, and the model client itself allows only one request.
+        """
+        if self._refreshing or not secrets.llm_configured():
+            return 0
+        now = int(self._now_ms())
+        pending = pending_llm_items(
+            self._db_path, tuple(sorted(live.PANEL_SOURCES)), now - 24 * 3_600_000,
+            limit=BACKFILL_BATCH,
+        )
+        if not pending:
+            return 0
+        snap = {"items": pending, "sources": dict(self._sources), "status": "ok", "fetched_at": now}
+        try:
+            self._scorer(snap)
+        except Exception:
+            log.warning("news backfill failed")
+            return 0
+        log.info("news backfill scored=%s", len(pending))
+        return len(pending)
+
+    def _backfill_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                count = self.backfill_once()
+            except Exception:
+                log.warning("news backfill failed")
+                count = 0
+            self._stop.wait(BACKFILL_GAP_S if count else BACKFILL_IDLE_S)
 
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        backfill = getattr(self, "_backfill_thread", None)
+        if backfill is not None and backfill.is_alive():
+            backfill.join(timeout=2.0)

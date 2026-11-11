@@ -236,6 +236,8 @@ a { color: var(--brass); }
 }
 .news-original a, .news-original > span:first-child { flex: 1 1 100%; color: var(--muted); }
 .news-source, .news-when { white-space: nowrap; }
+.news-other { margin-top: 0.35rem; }
+.news-other summary { cursor: pointer; color: var(--muted); font-size: 0.72rem; }
 .news-reason { margin-top: 0.1rem; color: var(--muted); font-size: 0.66rem; }
 .news-reason summary { cursor: pointer; }
 .news-dir.up { background: rgba(125, 186, 106, 0.16); }

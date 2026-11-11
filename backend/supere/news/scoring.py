@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 
 from supere import secrets
+from supere.news.summary import market_channel
 from supere.storage.db import Database
 
 SCORER_VERSION = "ds-v2"
@@ -203,6 +204,8 @@ def rule_score(title: str, body: str = "") -> Score:
             event = name
             break
     direction = _clip(direction, -1, 1)
+    if market_channel(title, body):
+        relevance = max(relevance, 0.55)
     return ensure_display_fields(Score(
         eth_relevance=round(relevance, 3), direction=round(direction, 3),
         urgency=round(urgency, 3), magnitude=round(magnitude, 3),
@@ -455,7 +458,8 @@ def score_items(db_path: Path, items: list[dict], *, use_deepseek: bool = True,
         db.close()
 
 
-def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) -> list[dict]:
+def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None,
+              sources: tuple[str, ...] | None = None) -> list[dict]:
     """Read-only view for ``/api/news``. Missing columns degrade to defaults."""
     path = Path(db_path)
     if not path.exists():
@@ -484,6 +488,10 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
         if since_ms is not None:
             where += f" AND {avail} >= ?"
             args.append(int(since_ms))
+        if sources:
+            marks = ",".join("?" for _ in sources)
+            where += f" AND source IN ({marks})"
+            args.extend(sources)
         sql = (f"SELECT id, {avail} AS available_at, ts_published, ts_ingested, source, title, url, "
                f"{relevance}, {direction}, {urgency}, {magnitude}, {event}, {timing}, "
                f"COALESCE(scored_by,''), COALESCE(score_version,''), {summary}, {label}, {content}, "
@@ -496,4 +504,33 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
             "relevance", "direction", "urgency", "magnitude", "event_type",
             "timing_quality", "scored_by", "score_version", "summary_zh",
             "sentiment_label", "content_hash", "reason_zh", "importance", "impact_zh"]
+    return [dict(zip(keys, row, strict=True)) for row in rows]
+
+
+def pending_llm_items(db_path: Path, sources: tuple[str, ...], since_ms: int, *,
+                      limit: int = 10) -> list[dict]:
+    """Panel-source rows still on the rule fallback, oldest gap first within the window.
+
+    GDELT and already-scored model rows are not returned. The caller rate-limits.
+    """
+    path = Path(db_path)
+    if not path.exists() or not sources:
+        return []
+    marks = ",".join("?" for _ in sources)
+    uri = f"file:{path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        rows = conn.execute(
+            f"""SELECT id, title, body, url, source, content_hash, ts_published, available_at
+                FROM news
+                WHERE source IN ({marks})
+                  AND COALESCE(ts_published, available_at, ts_ingested) >= ?
+                  AND (scored_by IS NULL OR scored_by IN ('', 'pending', 'rule', 'rule_fallback'))
+                ORDER BY COALESCE(ts_published, available_at, ts_ingested) DESC
+                LIMIT ?""",
+            (*sources, int(since_ms), int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+    keys = ["id", "title", "body", "url", "source", "content_hash", "ts_published", "available_at"]
     return [dict(zip(keys, row, strict=True)) for row in rows]

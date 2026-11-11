@@ -60,10 +60,19 @@ export function relativeTime(ts, nowMs) {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
+export function awaitingTranslation(item) {
+  const scorer = String(item?.scored_by || item?.scoredBy || "");
+  return scorer === "rule" || scorer === "rule_fallback";
+}
+
 export function formatNewsRow(item, nowMs = Date.now()) {
   const direction = finite(item?.direction) ? Number(item.direction) : 0;
   const title = item?.title || "(无标题)";
-  const summary = String(item?.summary_zh || item?.summary || "").trim();
+  const awaiting = awaitingTranslation(item);
+  const summaryText = String(item?.summary_zh || item?.summary || "").trim();
+  const summary = awaiting
+    ? "翻译中"
+    : (summaryText || `${title}。当前只有标题信息，具体细节和影响仍不确定。`);
   const ts = finite(item?.ts_published) ? Number(item.ts_published)
     : finite(item?.available_at) ? Number(item.available_at) : null;
   const importance = finite(item?.importance) ? Number(item.importance) : (isUrgent(item) ? 3 : 1);
@@ -79,9 +88,10 @@ export function formatNewsRow(item, nowMs = Date.now()) {
     direction,
     directionClass: directionClass(direction),
     directionLabel: item?.sentiment_label || directionLabel(direction),
-    summary: summary || `${title}。当前只有标题信息，具体细节和影响仍不确定。`,
-    reason: String(item?.reason_zh || "").trim(),
-    impact: String(item?.impact_zh || "").trim(),
+    summary,
+    awaiting,
+    reason: awaiting ? "" : String(item?.reason_zh || "").trim(),
+    impact: awaiting ? "" : String(item?.impact_zh || "").trim(),
     importance,
     urgent,
     important: importance >= 2 || urgent,

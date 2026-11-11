@@ -477,3 +477,76 @@ def test_refresh_end_to_end_with_mock_llm(tmp_path: Path, monkeypatch, caplog):
     finally:
         db.close()
     assert SECRET not in stored
+
+
+def _insert(db: Database, source: str, title: str, *, relevance: float = 0.9,
+            scored_by: str = "rule_fallback", now: int = NOW) -> None:
+    db.insert_news({
+        "ts_published": now - 60_000, "ts_ingested": now - 60_000, "ts_local": now - 60_000,
+        "source": source, "source_tier": 2, "lang": "en", "title": title, "body": "",
+        "url": f"https://example.com/{source}/{title[:12]}", "url_hash": f"h-{source}-{title[:8]}",
+        "text_simhash": "0", "status": "scored", "available_at": now - 60_000,
+        "timing_quality": "ingested", "direction_score": 0.2, "eth_relevance": relevance,
+        "urgency": 0.3, "scored_by": scored_by, "score_version": "old",
+        "content_hash": f"c-{source}-{title[:8]}",
+        "summary_zh": f"{title}。这条消息被判断为中性。", "sentiment_label": "中性",
+    })
+
+
+def test_panel_hides_gdelt_and_low_relevance(tmp_path: Path):
+    from supere.train.serve import _news_payload
+
+    db = Database(tmp_path / "superE.sqlite")
+    _insert(db, "gdelt", "Miami-Dade tax office accepts bitcoin", relevance=0.9)
+    _insert(db, "coindesk", "Ethereum staking queue grows", relevance=0.9)
+    _insert(db, "coindesk", "Solana wallet teams with SpaceX", relevance=0.1)
+    _insert(db, "google_news", "Fed holds rates as inflation cools", relevance=0.6)
+    db.close()
+    payload = _news_payload(tmp_path, 80, 24, now_ms=NOW)
+    titles = [row["title"] for row in payload["items"]]
+    other = [row["title"] for row in payload["other"]]
+    assert "Ethereum staking queue grows" in titles
+    assert "Fed holds rates as inflation cools" in titles
+    assert "Miami-Dade tax office accepts bitcoin" not in titles
+    assert "Miami-Dade tax office accepts bitcoin" not in other
+    assert "Solana wallet teams with SpaceX" in other
+    assert payload["aggregate"]["count"] == len(payload["items"])
+
+
+def test_fetch_keeps_macro_and_bitcoin_and_drops_unrelated():
+    assert live._relevant("Fed holds rates, dollar firms", "")
+    assert live._relevant("Bitcoin ETF sees record inflows", "")
+    assert live._relevant("ETH liquidations spike", "")
+    assert not live._relevant("Solana wallet teams with SpaceX", "")
+    assert not live._relevant("US home price index rises", "")
+    assert not live._relevant("Dogecoin meme of the day", "")
+
+
+def test_backfill_scores_rule_rows_and_skips_gdelt(tmp_path: Path, monkeypatch):
+    from supere.news.scoring import pending_llm_items
+
+    monkeypatch.setenv("SUPERE_LLM_BASE_URL", "https://opencode.ai/zen/go")
+    monkeypatch.setenv("SUPERE_LLM_API_KEY", SECRET)
+    db = Database(tmp_path / "superE.sqlite")
+    _insert(db, "gdelt", "Ontario crypto founder kidnapped", scored_by="rule_fallback")
+    _insert(db, "coindesk", "Ethereum client release", scored_by="rule_fallback")
+    _insert(db, "decrypt", "Already translated ETH note", scored_by="llm")
+    db.close()
+    pending = pending_llm_items(
+        tmp_path / "superE.sqlite", tuple(sorted(live.PANEL_SOURCES)), NOW - 24 * 3_600_000, limit=8,
+    )
+    assert [row["source"] for row in pending] == ["coindesk"]
+    seen = []
+
+    def scorer(snap):
+        seen.extend(item["title"] for item in snap["items"])
+        return snap
+
+    refresher = NewsRefresher(
+        tmp_path / "superE.sqlite", fetcher=lambda now: {"items": []}, scorer=scorer,
+        now_ms=lambda: NOW,
+    )
+    assert refresher.backfill_once() == 1
+    assert seen == ["Ethereum client release"]
+    refresher._refreshing = True
+    assert refresher.backfill_once() == 0

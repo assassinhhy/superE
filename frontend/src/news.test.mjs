@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   NEWS_POLL_MS,
+  awaitingTranslation,
   directionClass,
   directionLabel,
   filterNews,
@@ -133,6 +134,20 @@ test("default list is 15 and news older than 6 hours stays folded", () => {
   const open = layoutNews(rows, now, { limit: 20, showOlder: true });
   assert.equal(open.rows.length, 17);
   assert.equal(open.olderHidden, 0);
+});
+
+test("rule fallback is not shown as a Chinese summary", () => {
+  const [row] = formatNewsRows([{
+    title: "SEC delays ether ETF",
+    summary_zh: "SEC delays ether ETF。这条监管消息被判断为利空，可能改变监管预期。",
+    scored_by: "rule_fallback",
+    direction: -0.4,
+    sentiment_label: "利空",
+  }]);
+  assert.equal(row.summary, "翻译中");
+  assert.equal(row.title, "SEC delays ether ETF");
+  assert.equal(row.awaiting, true);
+  assert.equal(awaitingTranslation({ scored_by: "llm" }), false);
 });
 
 test("headline prefers the API line", () => {

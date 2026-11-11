@@ -174,7 +174,7 @@ def test_news_api_has_alert_and_summaries(tmp_path: Path):
     now = int(time.time() * 1000)
     db.insert_news({
         "ts_published": now - 1000, "ts_ingested": now - 1000, "ts_local": now - 1000,
-        "source": "test", "source_tier": 2, "lang": "en", "title": "Ethereum ETF inflow",
+        "source": "coindesk", "source_tier": 2, "lang": "en", "title": "Ethereum ETF inflow",
         "body": "", "url": "u", "url_hash": "h", "text_simhash": "0", "status": "scored",
         "available_at": now - 1000, "timing_quality": "ingested",
         "direction_score": 0.9, "eth_relevance": 0.9, "urgency": 0.8,

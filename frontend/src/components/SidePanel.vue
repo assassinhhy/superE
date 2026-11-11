@@ -72,6 +72,7 @@ let newsPoll = 0;
 let clockTick = 0;
 
 const newsRows = computed(() => formatNewsRows(view.value.news.items, nowMs.value));
+const otherRows = computed(() => formatNewsRows(view.value.news.other, nowMs.value));
 const filteredRows = computed(() => filterNews(newsRows.value, newsFilter.value));
 const laidOut = computed(() => layoutNews(filteredRows.value, nowMs.value, {
   limit: pageLimit.value,
@@ -313,6 +314,24 @@ const kinds = {
           </details>
         </li>
       </ul>
+      <details v-if="otherRows.length" class="news-other">
+        <summary>其它（{{ otherRows.length }}）</summary>
+        <ul class="news-feed">
+          <li v-for="item in otherRows" :key="'o-' + (item.id || item.contentHash || item.title)" class="news-item">
+            <div class="news-main">
+              <span class="news-dir" :class="item.directionClass">{{ item.directionLabel }}</span>
+              <p class="news-summary-text">{{ item.summary }}</p>
+            </div>
+            <p class="news-original">
+              <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+              <span v-else>{{ item.title }}</span>
+              <span class="news-source">{{ item.source }}</span>
+              <span class="news-when">{{ item.relative }}</span>
+            </p>
+          </li>
+        </ul>
+      </details>
+
       <div v-if="laidOut.hiddenRecent || laidOut.olderHidden" class="news-more">
         <button v-if="laidOut.hiddenRecent" type="button" @click="showMoreNews">更多（还有 {{ laidOut.hiddenRecent }} 条）</button>
         <button v-if="laidOut.olderHidden" type="button" @click="revealOlderNews">展开 6 小时前的 {{ laidOut.olderCount }} 条</button>

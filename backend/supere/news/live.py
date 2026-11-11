@@ -65,9 +65,21 @@ _DROP_QUERY = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_cont
 # headlines from the Google feed were too noisy for an ETH panel.
 MACRO_WORDS = {
     "fed", "fomc", "cpi", "inflation", "rate", "tariff", "sec", "etf", "hack",
-    "exploit", "security incident", "liquidation", "regulation", "lawsuit",
-    "crash", "plunge", "rally", "surge",
+    "exploit", "security incident", "liquidation", "liquidations", "regulation", "lawsuit",
+    "crash", "plunge", "rally", "surge", "usd", "dollar", "dxy",
 }
+# Bitcoin, ETF flows and liquidations can move ETH even when the headline never says ETH.
+BROAD_CRYPTO = {"bitcoin", "btc", "etf", "liquidation", "liquidations"}
+# Sources this refresh path writes. The panel and overlay ignore anything else
+# (historical GDELT rows live in the same database and must not be shown).
+PANEL_SOURCES = frozenset({
+    "binance_announcement",
+    "coindesk",
+    "cointelegraph",
+    "decrypt",
+    "theblock",
+    "google_news",
+})
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 
@@ -149,9 +161,13 @@ def _relevant(title: str, body: str, *, eth_only: bool = False) -> bool:
         return eth
     if eth:
         return True
+    if tokens & BROAD_CRYPTO or any(phrase in text for phrase in ("比特币", "清算", "资金流", "美联储", "通胀", "美元")):
+        return True
+    if tokens & MACRO_WORDS:
+        return True
     if tokens & OTHER_ASSETS:
         return False
-    return bool(tokens & MACRO_WORDS)
+    return False
 
 
 def _client(proxy: str | None, timeout: float) -> httpx.Client:
@@ -266,7 +282,7 @@ def _rss_items(name: str, raw: bytes, now_ms: int, *, eth_only: bool = False) ->
             continue
         if published is not None and now_ms - published > MAX_AGE_MS:
             continue
-        if not _relevant(title, body, eth_only=eth_only or name == "google_news_eth"):
+        if not _relevant(title, body, eth_only=eth_only):
             continue
         if name == "google_news_eth" and source_name:
             # Google titles carry a " - Publisher" suffix; keep the title readable.
@@ -288,7 +304,7 @@ def _fetch_rss(name: str, url: str, proxy: str | None, timeout: float, now_ms: i
     with _client(proxy, timeout) as client:
         response = client.get(url)
         response.raise_for_status()
-        rows = _rss_items(name, response.content, now_ms, eth_only=name == "google_news_eth")
+        rows = _rss_items(name, response.content, now_ms, eth_only=False)
         return limit_source(name, rows)
 
 
