@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from supere import __version__
 from supere.config import load_config
@@ -27,10 +28,19 @@ def main(argv: list[str] | None = None) -> None:
     prev.add_argument("--no-window", action="store_true", help="只启动 API，不创建窗口")
     prev.add_argument("--port", type=int, help="覆盖 API 端口，默认仍是 8766")
     prev.add_argument("--days", type=int, default=10, help="合成 K 线的天数，从 2026-10-26 起")
+    detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
+    detach.add_argument("role", choices=("ingestor", "api"))
     sub.add_parser("backup", help="立刻做一次 SQLite 在线备份和 Parquet 增量复制")
     sub.add_parser("restore-drill", help="把最近一份备份复制出来做完整性检查，不替换正在用的库")
 
     args = parser.parse_args(argv)
+    if args.cmd == "detach":
+        from supere.spawn import spawn_service
+
+        root = Path(args.config).resolve().parent if args.config else Path.cwd()
+        pid = spawn_service(args.role, root=root)
+        print(pid)
+        return
     try:
         cfg, path = load_config(args.config)
     except Exception as exc:

@@ -16,15 +16,17 @@ if defined SUPERE_PYTHON (
 )
 if not exist "%~dp0data\logs" mkdir "%~dp0data\logs"
 if not exist "%~dp0data\run" mkdir "%~dp0data\run"
-rem Start-Process does not inherit the caller's pipe, so PowerShell
-rem "bat | ..." does not stay blocked on the child stdout handle.
+rem detach uses CreateProcess with only stdin/stdout/stderr inherited, so a
+rem PowerShell pipe is not held open by the service.
 echo starting ingestor
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','ingestor' -WorkingDirectory '%CD%' -WindowStyle Minimized -RedirectStandardOutput '%CD%\data\logs\ingestor.stdout.log' -RedirectStandardError '%CD%\data\logs\ingestor.stderr.log'" <nul
+"%PY%" -m supere detach ingestor
+if errorlevel 1 echo failed to detach ingestor & exit /b 1
 ping 127.0.0.1 -n 3 >nul
 echo starting api on 127.0.0.1:8766
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','api' -WorkingDirectory '%CD%' -WindowStyle Minimized -RedirectStandardOutput '%CD%\data\logs\api.stdout.log' -RedirectStandardError '%CD%\data\logs\api.stderr.log'" <nul
+"%PY%" -m supere detach api
+if errorlevel 1 echo failed to detach api & exit /b 1
 echo starting window
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','desktop' -WorkingDirectory '%CD%' -WindowStyle Normal -RedirectStandardOutput '%CD%\data\logs\desktop.stdout.log' -RedirectStandardError '%CD%\data\logs\desktop.stderr.log'" <nul
 echo superE started. API http://127.0.0.1:8766/api/health
-echo stdout logs: data\logs\ingestor.stdout.log , data\logs\api.stdout.log , data\logs\desktop.stdout.log
+echo process output: data\logs\ingestor.stdout.log , data\logs\api.stdout.log , data\logs\desktop.stdout.log
 endlocal

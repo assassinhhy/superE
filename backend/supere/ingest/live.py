@@ -36,7 +36,7 @@ from supere.ingest.kline_manager import KlineManager
 from supere.ingest.overlap import OverlapGate
 from supere.ipc.bus import IpcServer
 from supere.lockfile import SingleInstance
-from supere.logging_setup import setup_logging
+from supere.logging_setup import flush_logs, setup_logging
 from supere.news.adapters import default_registry, persist_news
 from supere.ratelimit import WeightLimiter
 from supere.storage.backup import backup_sqlite, copy_new_parquet, prune_old_backups
@@ -116,7 +116,7 @@ class Ingestor:
         apply_no_proxy(self.cfg.proxy.no_proxy)
         assert_loopback(self.cfg.server.api_host)
         assert_loopback(self.cfg.server.ipc_host)
-        setup_logging(self.root / "logs")
+        setup_logging(self.root / "logs", "ingestor")
         self.lock.acquire()
         pid_path = self.root / "run" / "ingestor.pid"
         _write_pid(pid_path)
@@ -187,6 +187,8 @@ class Ingestor:
 
     async def _shutdown(self, pid_path: Path) -> None:
         self.stop.set()
+        log.info("采集器开始关闭，先写入暂存并做 checkpoint")
+        flush_logs()
         try:
             self._flush_agg_state()
             finalize_storage(self.store, self.db, self.coverage)
@@ -201,6 +203,8 @@ class Ingestor:
             await self.ipc.close()
         pid_path.unlink(missing_ok=True)
         self.lock.release()
+        log.info("采集器已关闭")
+        flush_logs()
 
     async def _live(self) -> None:
         tasks = [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -43,38 +44,56 @@ class _Utc8Formatter(logging.Formatter):
 
 
 class _DailyUtc8Handler(logging.Handler):
-    """One file per UTC+8 date: ``supere-YYYY-MM-DD.log``."""
+    """One UTF-8 file per process per UTC+8 date.
 
-    def __init__(self, directory: Path) -> None:
+    The ingestor and the API used to append to the same file. Two processes
+    flushing a text buffer can split a 3-byte character, which shows up as
+    ``已连�`` or ``请检�``. Each line is one ``os.write`` of UTF-8 bytes, and
+    each process has its own file: ``supere-<component>-YYYY-MM-DD.log``.
+    """
+
+    def __init__(self, directory: Path, component: str) -> None:
         super().__init__()
         self.directory = directory
+        self.component = component
         self.directory.mkdir(parents=True, exist_ok=True)
         self._date: str | None = None
-        self._stream = None
+        self._fd: int | None = None
 
-    def _open_for(self, date: str):
-        if self._stream is not None and self._date == date:
-            return self._stream
-        if self._stream is not None:
-            self._stream.close()
-        path = self.directory / f"supere-{date}.log"
-        self._stream = path.open("a", encoding="utf-8")
+    def _open_for(self, date: str) -> int:
+        if self._fd is not None and self._date == date:
+            return self._fd
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        path = self.directory / f"supere-{self.component}-{date}.log"
+        self._fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
         self._date = date
-        return self._stream
+        return self._fd
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             date = datetime.fromtimestamp(record.created, tz=UTC8).strftime("%Y-%m-%d")
-            stream = self._open_for(date)
-            stream.write(self.format(record) + "\n")
-            stream.flush()
+            fd = self._open_for(date)
+            os.write(fd, (self.format(record) + "\n").encode("utf-8"))
         except Exception:
             self.handleError(record)
 
+    def flush(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            os.fsync(self._fd)
+        except OSError:
+            pass
+
     def close(self) -> None:
-        if self._stream is not None:
-            self._stream.close()
-            self._stream = None
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
         super().close()
 
 
@@ -95,7 +114,16 @@ def configure_stdio() -> None:
             continue
 
 
-def setup_logging(log_dir: Path, level: int = logging.INFO) -> logging.Logger:
+def flush_logs() -> None:
+    logger = logging.getLogger("supere")
+    for handler in logger.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            continue
+
+
+def setup_logging(log_dir: Path, component: str, level: int = logging.INFO) -> logging.Logger:
     configure_stdio()
     logger = logging.getLogger("supere")
     logger.setLevel(level)
@@ -107,7 +135,7 @@ def setup_logging(log_dir: Path, level: int = logging.INFO) -> logging.Logger:
     formatter = _Utc8Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     mask = _MaskFilter()
 
-    file_handler = _DailyUtc8Handler(log_dir)
+    file_handler = _DailyUtc8Handler(log_dir, component)
     file_handler.setFormatter(formatter)
     file_handler.addFilter(mask)
 

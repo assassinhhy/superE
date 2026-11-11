@@ -174,6 +174,39 @@ def test_archive_csv_header_microseconds_and_checksum():
     assert "1577836800000" in zip_text(buffer.getvalue())
 
 
+def test_metrics_quoted_empty_ratios_are_null(caplog):
+    import logging
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent / "fixtures" / "ethusdt_metrics_empty_quotes.csv").read_text(
+        encoding="utf-8"
+    )
+    with caplog.at_level(logging.WARNING, logger="supere.parse"):
+        rows = parse_metrics_csv(text, "archive")
+    assert len(rows) == 4
+    good = rows[0]
+    assert good.oi == "472000.00000000"
+    assert good.oi_value == "1750000000.00000000"
+    assert good.top_acc_lsr == "1.2345"
+    assert good.top_pos_lsr == "1.1111"
+    assert good.global_lsr == "0.9"
+    assert good.taker_lsr == "1.0"
+    empty = rows[1]
+    assert empty.oi == "472186.06100000"
+    assert empty.oi_value == "1759026965.49760320"
+    assert empty.top_acc_lsr is None
+    assert empty.top_pos_lsr is None
+    assert empty.global_lsr is None
+    assert empty.taker_lsr is None
+    blank = rows[3]
+    assert blank.top_acc_lsr is None
+    assert blank.top_pos_lsr is None
+    assert blank.global_lsr is None
+    assert blank.taker_lsr is None
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+
+
 def test_ws_messages_parse():
     kline = parse_ws_message(
         '{"e":"kline","E":10,"s":"ETHUSDT","k":{"t":0,"T":59999,"s":"ETHUSDT","i":"1m","o":"1","c":"2","h":"3","l":"0.5","v":"4","n":5,"x":false,"q":"6","V":"7","Q":"8","B":"0"}}'

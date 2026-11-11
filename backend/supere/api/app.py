@@ -359,7 +359,7 @@ async def serve(cfg: AppConfig, config_path) -> None:
     apply_no_proxy(cfg.proxy.no_proxy)
     assert_loopback(cfg.server.api_host)
     root = data_dir(cfg, config_path)
-    setup_logging(root / "logs")
+    setup_logging(root / "logs", "api")
     pid = root / "run" / "api.pid"
     pid.parent.mkdir(parents=True, exist_ok=True)
     pid.write_text(str(os.getpid()), encoding="utf-8")
@@ -388,11 +388,20 @@ async def serve(cfg: AppConfig, config_path) -> None:
     )
     server = uvicorn.Server(config)
     app.state.server = server
+    import logging
+
+    from supere.logging_setup import flush_logs
+
+    log = logging.getLogger("supere")
     try:
         await server.serve()
     finally:
+        log.info("API 开始关闭")
+        flush_logs()
         if db is not None:
             db.close()
         if duck is not None:
             duck.close()
         Path(pid).unlink(missing_ok=True)
+        log.info("API 已关闭")
+        flush_logs()

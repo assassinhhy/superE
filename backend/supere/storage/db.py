@@ -147,6 +147,29 @@ class Database:
             return None
         return int(row[0]), int(row[1])
 
+    def count_klines_between(
+        self, market: str, symbol: str, interval: str, start_open: int, end_open: int
+    ) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM klines
+            WHERE market=? AND symbol=? AND interval=?
+              AND open_time>=? AND open_time<=?
+            """,
+            (market, symbol, interval, start_open, end_open),
+        ).fetchone()
+        return int(row[0])
+
+    def count_metrics_between(self, symbol: str, start_ms: int, end_ms: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM um_metrics
+            WHERE symbol=? AND ts>=? AND ts<?
+            """,
+            (symbol, start_ms, end_ms),
+        ).fetchone()
+        return int(row[0])
+
     def count_klines(self, market: str | None = None) -> int:
         if market is None:
             return int(self.conn.execute("SELECT COUNT(*) FROM klines").fetchone()[0])

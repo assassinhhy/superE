@@ -2,17 +2,43 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
-from decimal import Decimal
+import logging
+from decimal import Decimal, InvalidOperation
 
 from supere.storage.models import FundingRow, Kline, MetricRow
 from supere.timeutil import parse_utc_datetime, to_millis
+
+log = logging.getLogger("supere.parse")
+
+# Archive cells that are present but carry no number. csv.reader already turns
+# a quoted "" into an empty string; the two-character form is kept for files
+# that were escaped twice.
+_BLANK_METRICS = frozenset({"", "null", "none", "nan", "n/a", "na", "-", "--", '""'})
 
 
 def dec_str(value: object) -> str:
     if value is None or value == "":
         return "0"
     return format(Decimal(str(value)), "f")
+
+
+def optional_dec_str(value: object) -> tuple[str | None, str]:
+    """Parse an optional decimal. Returns ``(text, "ok"|"blank"|"bad")``.
+
+    Blank and unparsable archive cells become NULL instead of failing the file.
+    """
+    if value is None:
+        return None, "blank"
+    text = str(value).strip()
+    if text.lower() in _BLANK_METRICS:
+        return None, "blank"
+    try:
+        return format(Decimal(text), "f"), "ok"
+    except (InvalidOperation, ValueError):
+        return None, "bad"
 
 
 def _as_int(value: object) -> int:
@@ -96,29 +122,75 @@ def parse_funding_csv(text: str, symbol: str, source: str = "archive") -> list[F
     return rows
 
 
+_METRIC_FIELDS = (
+    "create_time",
+    "symbol",
+    "sum_open_interest",
+    "sum_open_interest_value",
+    "count_toptrader_long_short_ratio",
+    "sum_toptrader_long_short_ratio",
+    "count_long_short_ratio",
+    "sum_taker_long_short_vol_ratio",
+)
+
+
 def parse_metrics_csv(text: str, source: str = "archive") -> list[MetricRow]:
+    """Read a metrics archive. Quoted empty ratio cells are NULL, not an error.
+
+    Binance's 2021-12-30 file writes the last four columns as ``\"\"`` from
+    14:35 onward. ``str.split(',')`` keeps the quotes and ``Decimal`` rejects them.
+    """
     rows: list[MetricRow] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("create_time"):
+    blank = 0
+    bad = 0
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        return rows
+    if "create_time" not in {name.strip() for name in reader.fieldnames}:
+        # No header: treat the first row as data by re-reading with fixed names.
+        reader = csv.DictReader(io.StringIO(text), fieldnames=list(_METRIC_FIELDS))
+    for raw in reader:
+        item = {(key or "").strip(): value for key, value in raw.items()}
+        ts_raw = (item.get("create_time") or "").strip()
+        if not ts_raw or ts_raw.lower() == "create_time":
             continue
-        parts = line.split(",")
-        if len(parts) < 8:
+        symbol = (item.get("symbol") or "").strip()
+        if not symbol:
             continue
-        ts_raw = parts[0].strip()
         ts = parse_utc_datetime(ts_raw) if not ts_raw.isdigit() else to_millis(int(ts_raw))
+        numbers: dict[str, str | None] = {}
+        for column, attr in (
+            ("sum_open_interest", "oi"),
+            ("sum_open_interest_value", "oi_value"),
+            ("count_toptrader_long_short_ratio", "top_acc_lsr"),
+            ("sum_toptrader_long_short_ratio", "top_pos_lsr"),
+            ("count_long_short_ratio", "global_lsr"),
+            ("sum_taker_long_short_vol_ratio", "taker_lsr"),
+        ):
+            value, kind = optional_dec_str(item.get(column))
+            numbers[attr] = value
+            if kind == "blank":
+                blank += 1
+            elif kind == "bad":
+                bad += 1
         rows.append(
             MetricRow(
-                symbol=parts[1].strip().upper(),
+                symbol=symbol.upper(),
                 ts=ts,
-                oi=dec_str(parts[2]),
-                oi_value=dec_str(parts[3]),
-                top_acc_lsr=dec_str(parts[4]),
-                top_pos_lsr=dec_str(parts[5]),
-                global_lsr=dec_str(parts[6]),
-                taker_lsr=dec_str(parts[7]),
+                oi=numbers["oi"],
+                oi_value=numbers["oi_value"],
+                top_acc_lsr=numbers["top_acc_lsr"],
+                top_pos_lsr=numbers["top_pos_lsr"],
+                global_lsr=numbers["global_lsr"],
+                taker_lsr=numbers["taker_lsr"],
                 source=source,
             )
+        )
+    if blank or bad:
+        log.warning(
+            "metrics 存档有 %s 个空字段、%s 个无法解析的数值，已按 NULL 写入，本文件继续导入",
+            blank,
+            bad,
         )
     rows.sort(key=lambda row: row.ts)
     return rows

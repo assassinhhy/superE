@@ -23,9 +23,59 @@ from supere.ingest.gapfill import (
     recompute_coverage,
     rest_path,
 )
-from supere.intervals import REST_ONLY_INTERVALS, UM_INTERVALS, align_open, last_closed_open
+from supere.intervals import (
+    REST_ONLY_INTERVALS,
+    UM_INTERVALS,
+    align_open,
+    last_closed_open,
+    next_open,
+    previous_open,
+)
 
 log = logging.getLogger("supere.backfill")
+
+
+def span_bounds(interval: str, start_ms: int, end_ms_exclusive: int) -> tuple[int, int] | None:
+    """First and last candle open times that fall inside ``[start, end)``."""
+    start_open = align_open(interval, start_ms)
+    if start_open < start_ms:
+        start_open = next_open(interval, start_open)
+    last_open = align_open(interval, end_ms_exclusive - 1)
+    if last_open < start_open:
+        return None
+    return start_open, last_open
+
+
+def span_is_complete(db, market: str, symbol: str, interval: str, start_open: int, end_open: int) -> bool:
+    """True when every expected open in the span is already stored.
+
+    A rerun can then skip that archive. UPSERT still makes a partial span safe
+    to import again.
+    """
+    if end_open < start_open:
+        return False
+    expected = 0
+    cursor = start_open
+    while cursor <= end_open:
+        expected += 1
+        nxt = next_open(interval, cursor)
+        if nxt <= cursor:
+            break
+        cursor = nxt
+        if expected > 200_000:
+            break
+    if expected == 0:
+        return False
+    return db.count_klines_between(market, symbol, interval, start_open, end_open) >= expected
+
+
+def month_bounds_ms(year: int, month: int) -> tuple[int, int]:
+    start = int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1000)
+    if month == 12:
+        end = int(datetime(year + 1, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    else:
+        end = int(datetime(year, month + 1, 1, tzinfo=UTC).timestamp() * 1000)
+    return start, end
 
 
 def iter_months(start, end):
@@ -96,8 +146,6 @@ class Backfill:
                 self.rest, self.db, self.stamp, market, symbol, interval, self.cfg.ingest.startup_tail_limit
             )
             return
-        from supere.intervals import next_open, previous_open
-
         tail_from = next_open(interval, bounds[1])
         if tail_from <= last:
             await fill_kline_range(
@@ -120,6 +168,14 @@ class Backfill:
         series = _series(market)
         for year, month in months:
             stamp = f"{year:04d}-{month:02d}"
+            start_ms, end_ms = month_bounds_ms(year, month)
+            bounds = span_bounds(interval, start_ms, end_ms)
+            if bounds is not None and span_is_complete(
+                self.db, market, symbol.upper(), interval, bounds[0], bounds[1]
+            ):
+                covered.add((year, month))
+                log.info("已有 %s %s %s，跳过月度存档", market, interval, stamp)
+                continue
             url = kline_zip(self.cfg.endpoints.vision, venue, symbol.upper(), interval, "monthly", stamp, series)
             dest = rest_path(self.cfg, "klines", url.rsplit("/", 1)[-1])
             try:
@@ -151,6 +207,13 @@ class Backfill:
         series = _series(market)
         for day in days:
             stamp = day.isoformat()
+            start_ms = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+            bounds = span_bounds(interval, start_ms, start_ms + 86_400_000)
+            if bounds is not None and span_is_complete(
+                self.db, market, symbol.upper(), interval, bounds[0], bounds[1]
+            ):
+                log.info("已有 %s %s %s，跳过日度存档", market, interval, stamp)
+                continue
             url = kline_zip(self.cfg.endpoints.vision, venue, symbol.upper(), interval, "daily", stamp, series)
             dest = rest_path(self.cfg, "klines", url.rsplit("/", 1)[-1])
             try:
@@ -213,6 +276,12 @@ class Backfill:
                 day += timedelta(days=1)
         for day in days:
             stamp = day.isoformat()
+            start_ms = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+            # A full UTC day of 5-minute metrics is 288 rows. Already-imported
+            # days are left in place; a day that crashed before commit is retried.
+            if self.db.count_metrics_between(symbol.upper(), start_ms, start_ms + 86_400_000) >= 288:
+                log.info("已有 metrics %s，跳过", stamp)
+                continue
             url = metrics_zip(self.cfg.endpoints.vision, symbol.upper(), stamp)
             dest = rest_path(self.cfg, "metrics", url.rsplit("/", 1)[-1])
             try:
@@ -222,5 +291,9 @@ class Backfill:
                 continue
             if not ok:
                 continue
-            rows = parse_metrics_csv(zip_text(dest.read_bytes()), "archive")
-            self.db.upsert_metrics(rows)
+            try:
+                rows = parse_metrics_csv(zip_text(dest.read_bytes()), "archive")
+                self.db.upsert_metrics(rows)
+            except Exception:
+                log.warning("metrics 导入失败 %s", stamp, exc_info=True)
+                continue
