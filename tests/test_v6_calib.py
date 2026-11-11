@@ -265,6 +265,35 @@ def test_http_read_contract_does_not_advance_state():
     assert all(r["pending"] == 1 for r in responses)
 
 
+def test_out_of_order_predict_is_rejected():
+    df = _frame(10, seed=13)
+    eng = _engine(min_samples=1)
+    row = df.iloc[5]
+    q = row[["q10", "q25", "q50", "q75", "q90"]].to_numpy(float)
+    eng.predict(int(row.decision_ms), q, float(row.sigma_model), "late", int(row.horizon_end_ms))
+    earlier = df.iloc[4]
+    with pytest.raises(ValueError):
+        eng.predict(int(earlier.decision_ms),
+                    earlier[["q10", "q25", "q50", "q75", "q90"]].to_numpy(float),
+                    float(earlier.sigma_model), "early", int(earlier.horizon_end_ms))
+
+
+def test_atomic_snapshot_file_roundtrip(tmp_path):
+    df = _frame(20, seed=14)
+    eng = _engine(min_samples=1, candidate="cqr_aci")
+    row = df.iloc[0]
+    eng.set_label("p0", float(row.y_logret))
+    eng.predict(int(row.decision_ms),
+                row[["q10", "q25", "q50", "q75", "q90"]].to_numpy(float),
+                float(row.sigma_model), "p0", int(row.horizon_end_ms))
+    path = c.write_snapshot(tmp_path / "state.json", eng.snapshot())
+    assert path.exists() and not (tmp_path / "state.json.tmp").exists()
+    snap = c.read_snapshot(path)
+    eng2 = c.CalibrationEngine.restore(eng.cfg, 1000, 1e-6, snap)
+    assert eng2.snapshot() == eng.snapshot()
+    assert eng2.last_decision_ms == eng.last_decision_ms
+
+
 def test_protocol_frozen_once(tmp_path):
     doc = {"eval_protocol": "v6"}
     p = tmp_path / "proto.json"

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -159,6 +160,7 @@ class CalibrationEngine:
         self.fallbacks = {"cold": 0, "crossing": 0, "empty": 0, "duplicate": 0}
         self.quantile_clamp = 0
         self.window_days_eff = float(cfg.window_days)
+        self.last_decision_ms = -1
 
     # ---------------------------------------------------------------- clock
     def advance(self, now_ms: int) -> None:
@@ -201,7 +203,13 @@ class CalibrationEngine:
     # ------------------------------------------------------------- predict
     def predict(self, decision_ms: int, raw_q, sigma: float, pred_id: str,
                 horizon_end_ms: int):
-        self.advance(int(decision_ms))
+        decision_ms = int(decision_ms)
+        if decision_ms < self.last_decision_ms:
+            raise ValueError(
+                f"predictions must be in decision-time order: {decision_ms} < "
+                f"{self.last_decision_ms}")
+        self.last_decision_ms = decision_ms
+        self.advance(decision_ms)
         q = np.sort(np.asarray(raw_q, dtype=np.float64).copy())
         self.rows += 1
         if pred_id in self.seen_predict:
@@ -275,6 +283,7 @@ class CalibrationEngine:
             "alpha": {str(k): list(v) for k, v in self.alpha.items()},
             "alpha_clips": self.alpha_clips,
             "rows": self.rows,
+            "last_decision_ms": self.last_decision_ms,
             "bands": {
                 "50": self._band_snapshot(self.band50),
                 "80": self._band_snapshot(self.band80),
@@ -305,6 +314,7 @@ class CalibrationEngine:
         eng.alpha = {int(k): list(v) for k, v in snap["alpha"].items()}
         eng.alpha_clips = int(snap["alpha_clips"])
         eng.rows = int(snap["rows"])
+        eng.last_decision_ms = int(snap.get("last_decision_ms", -1))
         for band, key in ((eng.band50, "50"), (eng.band80, "80")):
             data = snap["bands"][key]
             band.head, band.tail = 0, len(data["decision"])
@@ -357,6 +367,21 @@ class ReadOnlyView:
     def fingerprint(self) -> str:
         import hashlib
         return hashlib.sha256(json.dumps(self.get(), sort_keys=True).encode()).hexdigest()
+
+
+def write_snapshot(path, snap: dict) -> Path:
+    """Atomically persist a state snapshot (tmp + os.replace)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(snap, ensure_ascii=False, separators=(",", ":")),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def read_snapshot(path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 # ------------------------------------------------------------------ replay
