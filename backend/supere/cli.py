@@ -22,6 +22,12 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("backfill", help="从 data.binance.vision 导入历史，不启动实时连接")
     sub.add_parser("api", help="只读 API，默认 127.0.0.1:8766")
+    desk = sub.add_parser("desktop", help="等本机 API 就绪后打开桌面窗口")
+    desk.add_argument("--no-window", action="store_true", help="只检查 API，不创建窗口")
+    prev = sub.add_parser("preview", help="用合成数据启动界面，不连接币安")
+    prev.add_argument("--no-window", action="store_true", help="只启动 API，不创建窗口")
+    prev.add_argument("--port", type=int, help="覆盖 API 端口，默认仍是 8766")
+    prev.add_argument("--days", type=int, default=10, help="合成 K 线的天数，从 2026-10-26 起")
     detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
     detach.add_argument("role", choices=("ingestor", "api"))
     sub.add_parser("backup", help="立刻做一次 SQLite 在线备份和 Parquet 增量复制")
@@ -53,6 +59,20 @@ def main(argv: list[str] | None = None) -> None:
         from supere.api.app import serve
 
         asyncio.run(serve(cfg, path))
+    elif args.cmd == "desktop":
+        from supere.desktop import serve_desktop
+
+        serve_desktop(cfg, path, open_window=not args.no_window)
+    elif args.cmd == "preview":
+        from supere.preview import serve_preview
+
+        serve_preview(
+            cfg,
+            path,
+            open_window=not args.no_window,
+            port=args.port,
+            days=args.days,
+        )
     elif args.cmd == "backup":
         _backup(cfg, path)
     elif args.cmd == "restore-drill":

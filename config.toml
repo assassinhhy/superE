@@ -86,3 +86,10 @@ fear_greed_poll_seconds = 21600
 hour_utc8 = 3
 keep_days = 14
 restore_drill_days = 30
+
+[fees]
+# 方案已拍板的公开费率。账户实际费率不同时，改 config.local.toml，不要写密钥。
+maker = 0.0002
+taker = 0.0005
+default_side = "taker"
+slippage_ticks = 1

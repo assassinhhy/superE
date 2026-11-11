@@ -69,6 +69,43 @@ class DuckReader:
         count, min_ts, max_ts = self.con.execute(sql, [glob]).fetchone()
         return {"rows": int(count), "files": len(files), "min_ts": min_ts, "max_ts": max_ts}
 
+    def force_orders(self, market: str, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+        """Settled self-recorded liquidations. Empty when that day was not recorded."""
+        from supere.timeutil import utc8_date
+
+        root = self.raw_root / "forceOrder" / market / symbol
+        if not root.exists():
+            return []
+        start_date = utc8_date(start_ms)
+        end_date = utc8_date(end_ms)
+        paths: list[str] = []
+        for folder in sorted(root.glob("date=*")):
+            date = folder.name.split("=", 1)[1]
+            if date < start_date or date > end_date:
+                continue
+            paths.extend(path.as_posix() for path in sorted(folder.glob("part-*.parquet")))
+        if not paths:
+            return []
+        rows = self.con.execute(
+            """
+            SELECT event_ms, price, qty, side
+            FROM read_parquet(?)
+            WHERE event_ms BETWEEN ? AND ?
+            ORDER BY event_ms
+            """,
+            [paths, start_ms, end_ms],
+        ).fetchall()
+        return [
+            {
+                "ts": int(event_ms),
+                "price": price,
+                "qty": qty,
+                "side": side,
+            }
+            for event_ms, price, qty, side in rows
+            if event_ms is not None
+        ]
+
     def agg_ids(self, market: str, symbol: str, date: str) -> list[int]:
         folder = self.raw_root / "aggTrades" / market / symbol / f"date={date}"
         if not folder.exists() or not any(folder.glob("part-*.parquet")):

@@ -1,6 +1,6 @@
 [project]
 name = "supere"
-version = "0.1.0"
+version = "0.2.0"
 description = "ETH market data and research forecasts. Reads public market data only; never places orders."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -11,6 +11,7 @@ dependencies = [
   "portalocker>=2.10",
   "pyarrow>=18",
   "pydantic>=2.9",
+  "pywebview>=6.2.1",
   "uvicorn>=0.32",
   "websockets==17.4",
 ]

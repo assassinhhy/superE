@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from websockets.asyncio.client import connect
@@ -67,9 +68,12 @@ class LiveHub:
 
     def __init__(self) -> None:
         self.forming: list[dict] = []
+        self.closed: deque[dict] = deque(maxlen=40)
         self.depth: dict | None = None
         self.ticker: dict | None = None
         self.mark: dict | None = None
+        self.trades: deque[dict] = deque(maxlen=80)
+        self.liquidations: deque[dict] = deque(maxlen=100)
         self.status: dict = {}
         self.connected = False
         self._ws = None
@@ -84,6 +88,10 @@ class LiveHub:
             self.ticker = message
         elif kind == "markPrice":
             self.mark = message
+        elif kind == "aggTrade":
+            self.trades.appendleft(message)
+        elif kind == "forceOrder":
+            self.liquidations.appendleft(message)
         elif kind == "kline":
             bar = message.get("bar")
             if not bar:
@@ -97,7 +105,9 @@ class LiveHub:
                 for item in self.forming
                 if (item.get("market"), item.get("symbol"), item.get("interval")) != msi
             ]
-            if not message.get("closed"):
+            if message.get("closed"):
+                self.closed.append(bar)
+            else:
                 self.forming.append(bar)
         elif kind == "forming":
             self.forming = list(message.get("bars") or [])
