@@ -1,0 +1,43 @@
+[project]
+name = "supere"
+version = "0.1.0"
+description = "ETH market data and research forecasts. Reads public market data only; never places orders."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "duckdb>=1.1",
+  "fastapi>=0.115",
+  "httpx>=0.28",
+  "portalocker>=2.10",
+  "pyarrow>=18",
+  "pydantic>=2.9",
+  "uvicorn>=0.32",
+  "websockets==17.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+supere = "supere.cli:main"
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["backend"]
+addopts = "-q"
+
+[tool.uv]
+package = true
