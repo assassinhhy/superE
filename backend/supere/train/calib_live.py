@@ -485,7 +485,9 @@ def open_state(data_root: Path, interval: str, art, *, clock=time.time,
                    model_hash=fp["model_hash"], calib_version=CALIB_VERSION)
     root = Path(state_root) if state_root is not None else state_root_for(data_root)
     path = state_path(root, symbol, interval, fp["model_hash"], CALIB_VERSION)
-    capacity = int(math.ceil(window * 86_400_000 / INTERVAL_MS[interval])) + 64
+    # 2x the window leaves room for a burst of matured labels before expiry;
+    # the persisted snapshot stores only the live head..tail slice.
+    capacity = 2 * int(math.ceil(window * 86_400_000 / INTERVAL_MS[interval])) + 128
 
     base = {
         "candidate": "cqr", "window_days": window,
@@ -512,6 +514,9 @@ def open_state(data_root: Path, interval: str, art, *, clock=time.time,
                     raise ValueError(f"engine config mismatch: {name}")
             if not isinstance(doc.get("engine"), dict):
                 raise ValueError("missing engine snapshot")
+            bs_hash = (doc.get("bootstrap") or {}).get("model_hash")
+            if bs_hash and bs_hash != key.model_hash:
+                raise ValueError("bootstrap model hash mismatch")
             eps = float(doc["eps"])
             eng = _restore_engine(doc.get("engine") or {}, candidate=base["candidate"],
                                   window_days=base["window_days"],

@@ -99,10 +99,26 @@ class _Band:
     tail: int = 0
 
     def append(self, decision_ms: int, s_lo: float, s_hi: float) -> None:
+        # A long-running live service appends forever while ``expire`` only
+        # advances ``head``; compact the live slice before reusing the buffer.
+        if self.tail >= self.decision.shape[0]:
+            self._compact()
+        if self.tail >= self.decision.shape[0]:
+            raise RuntimeError("calibration band capacity exhausted")
         self.decision[self.tail] = decision_ms
         self.s_lo[self.tail] = s_lo
         self.s_hi[self.tail] = s_hi
         self.tail += 1
+
+    def _compact(self) -> None:
+        if self.head <= 0:
+            return
+        n = self.tail - self.head
+        # Copy first: source and destination can overlap on the same buffer.
+        self.decision[:n] = self.decision[self.head:self.tail].copy()
+        self.s_lo[:n] = self.s_lo[self.head:self.tail].copy()
+        self.s_hi[:n] = self.s_hi[self.head:self.tail].copy()
+        self.head, self.tail = 0, n
 
     def expire(self, cutoff_ms: int) -> None:
         while self.head < self.tail and self.decision[self.head] < cutoff_ms:

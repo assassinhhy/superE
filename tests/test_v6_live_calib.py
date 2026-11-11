@@ -339,6 +339,17 @@ def test_atomic_save_leaves_no_tmp(tmp_path):
     assert not list(path.parent.glob("*.tmp"))
 
 
+def test_band_compacts_for_long_running_service():
+    """A live band appends forever; head-only expiry must not overflow."""
+    band = calib_v6._Band(np.empty(8, np.int64), np.empty(8), np.empty(8))
+    for i in range(1_000):
+        band.append(i, float(i), float(i))
+        band.expire(i - 3)
+    assert band.count == 4
+    assert list(band.decision[band.head:band.tail]) == [996, 997, 998, 999]
+    assert band.tail <= band.decision.shape[0]
+
+
 def test_missing_decision_or_sigma_degrades(tmp_path):
     cal = live.LiveCalibrator(tmp_path, clock=lambda: 1.0, label_source=FakeLabels())
     pf = _pf(START)

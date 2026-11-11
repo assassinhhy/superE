@@ -170,7 +170,7 @@ def build_interval(data_root: Path, interval: str, *, now_ms: int,
                "上线后仍会回退 none")
 
     eps, eps_source = _eps_from_history(sigma, decision, window_start)
-    capacity = int(math.ceil(window_ms / step)) + 64
+    capacity = 2 * int(math.ceil(window_ms / step)) + 128
     eng = calib_v6.CalibrationEngine(
         calib_v6.EngineConfig(candidate="cqr", window_days=window_days,
                               min_samples=v6proto.MIN_CALIB_SAMPLES,

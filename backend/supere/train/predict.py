@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -382,6 +383,7 @@ class QuantilePredictService:
         # disable it explicitly (tests / offline diagnostics).
         self._calibrator = calibrator
         self._calibrator_disabled = calibrator is False
+        self._calibrator_lock = threading.Lock()
 
     # -- v6 live calibration ------------------------------------------------
 
@@ -389,8 +391,12 @@ class QuantilePredictService:
         if self._calibrator_disabled:
             return None
         if self._calibrator is None:
-            from supere.train.calib_live import LiveCalibrator
-            self._calibrator = LiveCalibrator(self.data_root, clock=self._clock)
+            # FastAPI runs sync endpoints in a thread pool; two first requests
+            # must not create two calibrators writing the same state.
+            with self._calibrator_lock:
+                if self._calibrator is None:
+                    from supere.train.calib_live import LiveCalibrator
+                    self._calibrator = LiveCalibrator(self.data_root, clock=self._clock)
         return self._calibrator
 
     def calibration_status(self) -> dict:
