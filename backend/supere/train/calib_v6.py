@@ -929,7 +929,9 @@ def run_interval(df, interval: str, out_dir: Path, *, macro: dict | None = None,
     summary["replay_path"] = str(path)
     summary["peek_ledger"] = {
         "holdout_read": False,
-        "candidate_replays": 2 + len(v6proto.GAMMA_CANDIDATES)
+        # none + cqr + two inner gamma runs + final cqr_aci
+        # (+1 longer window, +1 pooled-scope sensitivity when enabled)
+        "candidate_replays": 3 + len(v6proto.GAMMA_CANDIDATES)
         + (1 if longer_window else 0) + (1 if "pooled" in scopes else 0),
     }
     return summary
