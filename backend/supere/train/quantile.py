@@ -72,8 +72,8 @@ DROP_FEATURES = ()  # testing calendar features
 ZSCORE_SOURCES = ("taker_buy_ratio", "log_trades", "um_oi_chg_1h", "um_global_lsr", "um_taker_lsr", "funding_last",                  "mark_basis", "index_basis", "premium_index")
 # May be NaN (history starts later, or the series is optional); not required to be finite.
 OPTIONAL_PREFIXES = ("um_", "funding_", "mark_", "index_", "premium_",
-                     "btc_", "eth_btc_", "dvol_", "macro_")
-FEATURE_GROUPS: tuple[str, ...] = ("btc", "dvol", "macro")
+                      "btc_", "eth_btc_", "dvol_", "macro_", "ob_")
+FEATURE_GROUPS: tuple[str, ...] = ("btc", "dvol", "macro", "ob")
 ZWIN = 100
 MODEL_VERSION = 2
 

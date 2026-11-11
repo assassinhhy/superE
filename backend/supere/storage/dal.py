@@ -56,7 +56,47 @@ class DataAccess:
     def anomalies(self, limit: int = 100) -> list[dict]:
         if self.db is None:
             return []
-        return [dict(row) for row in self.db.list_anomalies(limit)]
+        out = []
+        for row in self.db.list_anomalies(limit):
+            item = dict(row)
+            if item.get("ts") is not None:
+                item["ts_utc8"] = format_utc8(int(item["ts"]))
+            out.append(item)
+        return out
+
+    def metrics_between(
+        self,
+        symbol: str,
+        start: int | None,
+        end: int | None,
+        limit: int = 2000,
+    ) -> list[dict]:
+        if self.db is None:
+            return []
+        out = []
+        for row in self.db.metrics_between(symbol, start, end, limit):
+            item = dict(row)
+            item["ts_utc8"] = format_utc8(int(item["ts"]))
+            item["known_at"] = int(item["ts"]) + 300_000
+            item["known_at_utc8"] = format_utc8(item["known_at"])
+            out.append(item)
+        return out
+
+    def funding_between(
+        self,
+        symbol: str,
+        start: int | None,
+        end: int | None,
+        limit: int = 500,
+    ) -> list[dict]:
+        if self.db is None:
+            return []
+        out = []
+        for row in self.db.funding_between(symbol, start, end, limit):
+            item = dict(row)
+            item["funding_time_utc8"] = format_utc8(int(item["funding_time"]))
+            out.append(item)
+        return out
 
     def duck_kline_count(self, market: str, symbol: str, interval: str) -> int | None:
         if self.duck is None or not self.ready:

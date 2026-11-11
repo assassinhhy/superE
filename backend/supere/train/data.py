@@ -34,6 +34,7 @@ class Bars:
     quote_volume: np.ndarray
     trades: np.ndarray
     taker_buy_base: np.ndarray
+    taker_buy_quote: np.ndarray | None = None
 
     @property
     def n(self) -> int:
@@ -61,6 +62,8 @@ class Bars:
             quote_volume=self.quote_volume[:end],
             trades=self.trades[:end],
             taker_buy_base=self.taker_buy_base[:end],
+            taker_buy_quote=(self.taker_buy_quote[:end]
+                             if self.taker_buy_quote is not None else None),
         )
 
 
@@ -121,7 +124,8 @@ def load_bars(
     close_by_ms: int | None = None,
 ) -> Bars:
     """``close_by_ms``: keep only bars whose close is at or before this time (a frozen snapshot)."""
-    cols_sql = "SELECT open_time, o, h, l, c, volume, quote_volume, trades, taker_buy_base FROM klines"
+    cols_sql = ("SELECT open_time, o, h, l, c, volume, quote_volume, trades, "
+                "taker_buy_base, taker_buy_quote FROM klines")
     where = "market = ? AND symbol = ? AND interval = ?"
     args: list = [market, symbol, interval]
     if close_by_ms is not None:
@@ -154,6 +158,7 @@ def load_bars(
         quote_volume=f64(6),
         trades=f64(7),
         taker_buy_base=f64(8),
+        taker_buy_quote=f64(9),
     )
     for name in ("o", "h", "l", "c", "volume"):
         bad = int(np.sum(~np.isfinite(getattr(bars, name))))

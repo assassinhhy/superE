@@ -42,6 +42,8 @@ class KlineManager:
             "volume": bar.volume,
             "quote_volume": bar.quote_volume,
             "trades": bar.trades,
+            "taker_buy_base": bar.taker_buy_base,
+            "taker_buy_quote": bar.taker_buy_quote,
             "closed": False,
             "asof": item.asof,
         }

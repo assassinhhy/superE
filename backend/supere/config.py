@@ -107,6 +107,15 @@ class BackupConfig(BaseModel):
     restore_drill_days: int = 30
 
 
+class FeesConfig(BaseModel):
+    """Public VIP0-style rates from the plan. The account's real rate wins."""
+
+    maker: float = 0.0002
+    taker: float = 0.0005
+    default_side: str = "taker"
+    slippage_ticks: int = 1
+
+
 class AppConfig(BaseModel):
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -120,6 +129,7 @@ class AppConfig(BaseModel):
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    fees: FeesConfig = Field(default_factory=FeesConfig)
 
 
 def find_config_path(explicit: str | None = None) -> Path:
