@@ -25,6 +25,8 @@ ping 127.0.0.1 -n 3 >nul
 echo starting api on 127.0.0.1:8766
 "%PY%" -m supere detach api
 if errorlevel 1 echo failed to detach api & exit /b 1
+echo starting window
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','desktop' -WorkingDirectory '%CD%' -WindowStyle Normal -RedirectStandardOutput '%CD%\data\logs\desktop.stdout.log' -RedirectStandardError '%CD%\data\logs\desktop.stderr.log'" <nul
 echo superE started. API http://127.0.0.1:8766/api/health
-echo process output: data\logs\ingestor.stdout.log and data\logs\api.stdout.log
+echo process output: data\logs\ingestor.stdout.log , data\logs\api.stdout.log , data\logs\desktop.stdout.log
 endlocal
