@@ -163,6 +163,10 @@ def _click_record(data_root: Path, now_ms: int, payload: dict, snapshot: dict,
     for item in payload.get("items") or []:
         forecast = item.get("price_forecast") or {}
         ov = item.get("news_overlay") or {}
+        cal = dict(forecast.get("calibration") or {})
+        # Keep the historical ``before``/``after`` keys untouched and add the
+        # reproducible v6 chain.  ``before`` is the calibrated (served) model
+        # interval; the raw v5 block is explicit below.
         horizons.append({
             "interval": item.get("interval"),
             "model_id": item.get("model_id"),
@@ -176,6 +180,30 @@ def _click_record(data_root: Path, now_ms: int, payload: dict, snapshot: dict,
             "width_multiplier": ov.get("width_multiplier"),
             "median_delta": ov.get("median_delta"),
             "top_news": ov.get("top_news") or [],
+            "asof_utc8": forecast.get("asof_utc8"),
+            "decision_ms": forecast.get("decision_ms"),
+            "horizon_end_ms": forecast.get("horizon_end_ms"),
+            "raw_price_forecast": forecast.get("raw_price_forecast"),
+            "calibrated_price_forecast": forecast.get("calibrated_price_forecast"),
+            "final_price_forecast": item.get("final_price_forecast"),
+            "calibration": {
+                "calib": cal.get("calib"),
+                "policy": cal.get("policy"),
+                "calib_version": cal.get("calib_version"),
+                "candidate": cal.get("candidate"),
+                "window_days": cal.get("window_days"),
+                "min_samples": cal.get("min_samples"),
+                "n_mature": cal.get("n_mature"),
+                "active": cal.get("active"),
+                "reason": cal.get("reason"),
+                "model_hash": cal.get("model_hash"),
+                "model_id": cal.get("model_id"),
+                "feature_hash": cal.get("feature_hash"),
+                "source": cal.get("source"),
+                "bootstrap": cal.get("bootstrap"),
+                "alert": cal.get("alert"),
+                "delay_ms": cal.get("delay_ms"),
+            },
         })
     news_items = news_payload.get("items") or []
     aggregate = news_payload.get("aggregate") or {}
@@ -222,7 +250,13 @@ def create_app(data_root: Path, *, news_snapshot=None, clock=None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "debug": True, "data_dir": str(root)}
+        out = {"ok": True, "debug": True, "data_dir": str(root)}
+        try:
+            out["calibration"] = service.calibration_status()
+        except Exception as exc:  # noqa: BLE001 - liveness first
+            out["calibration"] = {"enabled": True, "loaded": False,
+                                  "error": f"{type(exc).__name__}: {exc}"}
+        return out
 
     @app.get("/api/predict")
     def predict(interval: str | None = Query(default=None, max_length=8)):
@@ -267,6 +301,13 @@ def create_app(data_root: Path, *, news_snapshot=None, clock=None) -> FastAPI:
                 item["news_overlay"] = overlay.apply_overlay(item.get("price_forecast"), agg)
             except Exception:  # noqa: BLE001 - keep the raw forecast
                 item["news_overlay"] = None
+            # Explicit chain for the archive: raw -> calibrated -> final
+            # (final == calibrated when the news gate did not fire).
+            forecast = item.get("price_forecast") or {}
+            ov = item.get("news_overlay") or {}
+            item["final_price_forecast"] = (ov.get("adjusted")
+                                            or forecast.get("calibrated_price_forecast")
+                                            or None)
         payload["news"] = news_payload
         payload["trigger"] = "user_click"
         payload["click_at_utc8"] = format_utc8(now_ms)

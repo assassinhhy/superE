@@ -1066,19 +1066,26 @@ def load_v3(data_root: Path, interval: str) -> V3Artifact | None:
 # ---------------------------------------------------------------- inference
 
 def _load_inference_samples(data_root: Path, interval: str, cfg_dict: dict,
-                            now_ms: int) -> tuple[SamplesV3, int]:
+                            now_ms: int, *, bar_limit: int = 1500,
+                            one_min_limit: int = 60_000) -> tuple[SamplesV3, int]:
+    """Build causal inference samples for the newest closed bars.
+
+    ``bar_limit`` / ``one_min_limit`` can be raised by the offline bootstrap to
+    cover a 28/90 day calibration window; the live path keeps the historical
+    1500-bar default.
+    """
     cfg = default_config(interval, cfg_dict)
     db_path = Path(data_root) / "superE.sqlite"
     qc = _qcfg(cfg)
     groups = q.feature_groups(qc)
     conn = data.open_readonly(db_path)
     try:
-        bars = data.load_bars(conn, cfg.market, cfg.symbol, interval, 1500)
+        bars = data.load_bars(conn, cfg.market, cfg.symbol, interval, bar_limit)
         funding = data.load_funding(conn, cfg.symbol)
         metrics = data.load_metrics(conn, cfg.symbol)
-        mark = data.load_bars(conn, "um_mark", cfg.symbol, interval, 1500)
-        index = data.load_bars(conn, "um_index", cfg.symbol, interval, 1500)
-        premium = data.load_bars(conn, "um_premium", cfg.symbol, interval, 1500)
+        mark = data.load_bars(conn, "um_mark", cfg.symbol, interval, bar_limit)
+        index = data.load_bars(conn, "um_index", cfg.symbol, interval, bar_limit)
+        premium = data.load_bars(conn, "um_premium", cfg.symbol, interval, bar_limit)
         htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(interval)
         try:
             higher = data.load_bars(conn, "um", cfg.symbol, htf_interval, None) if htf_interval else None
@@ -1087,12 +1094,12 @@ def _load_inference_samples(data_root: Path, interval: str, cfg_dict: dict,
         btc_bars = None
         if "btc" in groups:
             try:
-                btc_bars = data.load_bars(conn, cfg.market, cfg.btc_symbol, interval, 1500)
+                btc_bars = data.load_bars(conn, cfg.market, cfg.btc_symbol, interval, bar_limit)
             except ValueError:
                 btc_bars = None
         one_min = None
         try:
-            one_min = data.load_bars(conn, cfg.market, cfg.symbol, "1m", 60_000)
+            one_min = data.load_bars(conn, cfg.market, cfg.symbol, "1m", one_min_limit)
         except ValueError:
             one_min = None
     finally:
@@ -1202,6 +1209,8 @@ def predict_latest(data_root: Path, interval: str, art: V3Artifact, now_ms: int)
     pf = {
         "interval": interval,
         "asof_utc8": _fmt(decision_ms),
+        "decision_ms": int(decision_ms),
+        "horizon_end_ms": int(decision_ms + horizon_ms),
         "horizon_end_utc8": _fmt(decision_ms + horizon_ms),
         "horizon_end_time": _fmt(decision_ms + horizon_ms),
         "ref_close": ref_close,

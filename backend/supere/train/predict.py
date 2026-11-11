@@ -370,7 +370,7 @@ _REASON = {
 import time as _t
 
 class QuantilePredictService:
-    def __init__(self, data_root, *, bar_limit=1500, clock=None):
+    def __init__(self, data_root, *, bar_limit=1500, clock=None, calibrator=None):
         from pathlib import Path
         self.data_root = Path(data_root)
         self.db_path = self.data_root / "superE.sqlite"
@@ -378,6 +378,32 @@ class QuantilePredictService:
         self._clock = clock or _t.time
         self._cache = {}
         self._v3_cache = {}
+        # ``None`` -> build the live v6 CQR calibrator lazily; pass False to
+        # disable it explicitly (tests / offline diagnostics).
+        self._calibrator = calibrator
+        self._calibrator_disabled = calibrator is False
+
+    # -- v6 live calibration ------------------------------------------------
+
+    def _get_calibrator(self):
+        if self._calibrator_disabled:
+            return None
+        if self._calibrator is None:
+            from supere.train.calib_live import LiveCalibrator
+            self._calibrator = LiveCalibrator(self.data_root, clock=self._clock)
+        return self._calibrator
+
+    def calibration_status(self) -> dict:
+        cal = self._calibrator
+        if cal is None or cal is False:
+            return {"enabled": not self._calibrator_disabled, "loaded": False,
+                    "intervals": {}}
+        try:
+            out = cal.status()
+            out["loaded"] = True
+            return out
+        except Exception as exc:  # noqa: BLE001 - health must stay simple
+            return {"enabled": True, "loaded": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def _artifact(self, interval):
         import supere.train.quantile as q
@@ -412,9 +438,19 @@ class QuantilePredictService:
             if v3_art is not None:
                 now_ms = int(self._clock() * 1000)
                 res = v3.predict_latest(self.data_root, interval, v3_art, now_ms)
-                res["price_forecast"] = _sanitize_forecast(
+                pf = _sanitize_forecast(
                     res.get("price_forecast"), getattr(v3_art, "meta", {}) or {}
                 )
+                # v6 order: v5 raw -> CQR / none -> (news overlay happens in
+                # serve.py) -> UI.  Calibration never raises into the endpoint.
+                if pf is not None:
+                    try:
+                        calibrator = self._get_calibrator()
+                        if calibrator is not None:
+                            pf = calibrator.decorate(interval, v3_art, pf, now_ms)
+                    except Exception:  # noqa: BLE001 - keep the raw forecast
+                        log.exception("v6 校准接入 %s 失败", interval)
+                res["price_forecast"] = pf
                 res["debug_note"] = "价格区间预测，样本外弱，勿实盘"
                 return res
         except Exception as exc:  # noqa: BLE001 - fall back to an explicit error item
