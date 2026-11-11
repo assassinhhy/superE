@@ -45,7 +45,7 @@ PRODUCT_INTERVALS = q.PRODUCT_INTERVALS
 ALPHAS = q.ALPHAS
 AKEY = q.AKEY
 FEATURE_MODES = ("base", "rv", "rv_season", "rv_micro", "all")
-SIGMA_KINDS = ("ewma", "garch", "har", "har_rs", "har_cj", "rgarch")
+SIGMA_KINDS = ("ewma", "garch", "har", "har_rs", "har_cj", "rgarch", "har_ex")
 SHAPES = ("quantile", "empirical", "student_t", "blend")
 CONFORMALS = ("none", "cqr", "norm", "weighted", "norm_aci")
 RV_PREFIXES = ("rv_", "logrv_", "bpv_", "log_bpv_", "rq_", "jump_", "rsp_", "rsn_",
@@ -344,6 +344,34 @@ def _h(cfg: V3Config) -> int:
 
 def _sigma_design(S: SamplesV3, cfg: V3Config, kind: str) -> tuple[list[str], np.ndarray]:
     h = _h(cfg)
+    if kind == "har_ex":
+        # Expanded causal design: HAR core + leverage/jump/seasonality/micro +
+        # optional DVOL/BTC/funding/OI columns when the feature block is loaded.
+        # Missing optional columns are skipped so the same code runs for every
+        # interval and feature mode; NaNs are median-imputed inside fit_sigma.
+        wanted = [
+            f"logrv_{h}m", "logrv_360m", "logrv_1440m",
+            f"log_rsp_{h}m", f"log_rsn_{h}m", f"log_bpv_{h}m",
+            f"jump_{h}m", f"rq_{h}m", f"rs_ratio_{h}m",
+            "park_20", "gk_20", "rv_z_1d",
+            "seas_ratio_hour", "seas_ratio_dow",
+            f"micro_taker_imb_{h}m", f"micro_log_volume_{h}m",
+            f"micro_quote_imb_{h}m", f"micro_log_trades_{h}m",
+            "funding_last_z100", "um_oi_chg_1h_z100", "um_global_lsr_z100",
+            "dvol_level", "dvol_chg_1h", "dvol_chg_4h", "dvol_rv_ratio",
+            "btc_rv_20", "btc_ret_1", "eth_btc_beta_20",
+        ]
+        cols: list[np.ndarray] = []
+        names: list[str] = []
+        index = {n: i for i, n in enumerate(S.names)}
+        for name in wanted:
+            if name in index:
+                names.append(name)
+                cols.append(S.X[:, index[name]])
+        # Past interval return and leverage are known at the decision moment.
+        names.extend(["ret_past", "abs_ret_past"])
+        cols.extend([S.r1[S.idx], np.abs(S.r1[S.idx])])
+        return names, np.column_stack(cols)
     if kind in ("har", "har_rs", "har_cj"):
         names, Z = rv.har_matrix(S.rvf, kind, h)
     elif kind == "rgarch":
@@ -364,12 +392,14 @@ def _sigma_design(S: SamplesV3, cfg: V3Config, kind: str) -> tuple[list[str], np
 
 def fit_sigma(S: SamplesV3, train: np.ndarray, cfg: V3Config, kind: str | None = None) -> SigmaFit:
     kind = kind or cfg.sigma_model
-    if kind in ("har", "har_rs", "har_cj", "rgarch") and S.rvf.n_1m == 0:
+    if kind in ("har", "har_rs", "har_cj", "rgarch", "har_ex") and S.rvf.n_1m == 0:
         return SigmaFit(kind="ewma", sigma_all=_clip_sigma(S.sig_base_full, S, train))
     if kind == "ewma":
         return SigmaFit(kind=kind, sigma_all=_clip_sigma(S.sig_base_full, S, train))
     if kind == "garch":
         return SigmaFit(kind=kind, sigma_all=_clip_sigma(S.sig_garch_full, S, train))
+    if kind == "har_ex":
+        return _fit_sigma_har_ex(S, train, cfg)
     names, Z = _sigma_design(S, cfg, kind)
     target = np.log(S.rvf.rv_future + rv.EPS)
     rows = S.idx[train]
@@ -392,6 +422,45 @@ def fit_sigma(S: SamplesV3, train: np.ndarray, cfg: V3Config, kind: str | None =
     sigma = _clip_sigma(sigma, S, train)
     return SigmaFit(kind=kind, feature_names=names, coef=np.asarray(model.coef_, dtype=np.float64),
                     intercept=float(model.intercept_), clip_lo=float(np.nanmin(sigma)),
+                    clip_hi=float(np.nanmax(sigma)), sigma_all=sigma,
+                    qlike=_qlike_at(S, sigma, train))
+
+
+def _fit_sigma_har_ex(S: SamplesV3, train: np.ndarray, cfg: V3Config) -> SigmaFit:
+    """Ridge on an expanded log-RV design (HAR + leverage/jump/season/micro/alt)."""
+    names, Z = _sigma_design(S, cfg, "har_ex")
+    target = np.log(S.rvf.rv_future + rv.EPS)
+    # Z rows follow the sample positions; the RV label follows the bar index.
+    bars = S.idx[train]
+    keep = (np.isfinite(target[bars]) & np.isfinite(S.rvf.rv_future[bars])
+            & (S.rvf.rv_future[bars] > 0))
+    if keep.sum() < 500:
+        return SigmaFit(kind="har_ex", sigma_all=_clip_sigma(S.sig_base_full, S, train))
+    Ztr = Z[train][keep]
+    med = np.nanmedian(Ztr, axis=0)
+    med = np.where(np.isfinite(med), med, 0.0)
+    Ztr = np.where(np.isfinite(Ztr), Ztr, med)
+    mu = Ztr.mean(axis=0)
+    sd = Ztr.std(axis=0)
+    sd = np.where(np.isfinite(sd) & (sd > 1e-9), sd, 1.0)
+    model = Ridge(alpha=10.0)
+    model.fit((Ztr - mu) / sd, target[bars][keep])
+    coef = np.asarray(model.coef_, dtype=np.float64) / sd
+    intercept = float(model.intercept_ - np.sum(model.coef_ * mu / sd))
+    filled = np.where(np.isfinite(Z), Z, med)
+    pred = intercept + filled @ coef
+    sigma_m = np.sqrt(np.exp(np.clip(pred, -30.0, 5.0)))
+    # Downstream code (clip/qlike/shape) indexes sigma by *bar* position, so
+    # expand the per-sample prediction back to the full bar axis.
+    sigma = np.full(S.bars_n, np.nan, dtype=np.float64)
+    sigma[S.idx] = sigma_m
+    known = np.nonzero(np.isfinite(sigma))[0]
+    if known.shape[0] < 2:
+        return SigmaFit(kind="har_ex", sigma_all=_clip_sigma(S.sig_base_full, S, train))
+    sigma = np.interp(np.arange(S.bars_n, dtype=np.float64), known, sigma[known])
+    sigma = _clip_sigma(sigma, S, train)
+    return SigmaFit(kind="har_ex", feature_names=names, coef=coef.astype(np.float64),
+                    intercept=intercept, clip_lo=float(np.nanmin(sigma)),
                     clip_hi=float(np.nanmax(sigma)), sigma_all=sigma,
                     qlike=_qlike_at(S, sigma, train))
 
