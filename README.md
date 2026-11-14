@@ -108,6 +108,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_launch_returns
 
 它听 `127.0.0.1:8769`。数据目录用配置里的那个，和采集器同一份库。模型密钥仍只读环境变量 `SUPERE_LLM_BASE_URL`、`SUPERE_LLM_API_KEY`、`SUPERE_LLM_MODEL`，没配 key 时用规则兜底。界面改完后在 `frontend` 里 `pnpm build`，再刷新桌面窗口；静态文件是 8766 从磁盘读的，一般不用重启 API。要系统气球通知时，只重启桌面窗口（`python -m supere desktop`），让它带上通知桥。
 
+盘面分析是另一个进程，不写主库，也不下单：
+
+```bat
+.venv\Scripts\python.exe -m supere board
+```
+
+它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。
+
 启动脚本会拉起三个进程：
 
 - 采集器：唯一可以写 SQLite 的进程。第二个实例拿不到 `data\superE.lock` 会直接退出。
