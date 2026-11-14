@@ -56,7 +56,7 @@ def spawn_detached(
 
 
 def spawn_service(role: str, *, root: Path, python: str | None = None) -> int:
-    if role not in {"ingestor", "api", "board"}:
+    if role not in {"ingestor", "api", "board", "news"}:
         raise ValueError(f"未知进程 {role}")
     root = Path(root)
     logs = root / "data" / "logs"

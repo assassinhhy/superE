@@ -28,6 +28,13 @@ if errorlevel 1 echo failed to detach api & exit /b 1
 echo starting board on 127.0.0.1:8770
 "%PY%" -m supere detach board
 if errorlevel 1 echo failed to detach board
+echo starting news on 127.0.0.1:8769
+rem news.local.ps1 is not committed. It sets SUPERE_LLM_* for the Chinese summaries.
+if exist "%~dp0news.local.ps1" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','%~dp0news.local.ps1' -WindowStyle Hidden" <nul
+) else (
+  "%PY%" -m supere detach news
+)
 echo starting window
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','desktop' -WorkingDirectory '%CD%' -WindowStyle Normal -RedirectStandardOutput '%CD%\data\logs\desktop.stdout.log' -RedirectStandardError '%CD%\data\logs\desktop.stderr.log'" <nul
 echo superE started. API http://127.0.0.1:8766/api/health

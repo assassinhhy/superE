@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> None:
     prev.add_argument("--port", type=int, help="覆盖 API 端口，默认仍是 8766")
     prev.add_argument("--days", type=int, default=10, help="合成 K 线的天数，从 2026-10-26 起")
     detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
-    detach.add_argument("role", choices=("ingestor", "api", "board"))
+    detach.add_argument("role", choices=("ingestor", "api", "board", "news"))
     news_cmd = sub.add_parser("news", help="消息面服务，127.0.0.1:8769，不加载预测模型")
     news_cmd.add_argument("--port", type=int, default=8769)
     news_cmd.add_argument("--data-dir", help="数据目录，默认用配置里的目录")

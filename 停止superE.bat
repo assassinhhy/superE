@@ -5,6 +5,8 @@ echo closing desktop window
 call :killpid "%~dp0data\run\desktop.pid"
 echo closing board service
 call :killpid "%~dp0data\run\board.pid"
+echo closing news service
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"127.0.0.1:8769 .*LISTENING"') do taskkill /PID %%p /T /F >nul 2>&1
 echo asking API to shut down
 curl.exe -s -m 5 -X POST http://127.0.0.1:8766/api/shutdown >nul
 rem timeout.exe fails with "input redirection is not supported" when stdin
