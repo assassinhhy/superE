@@ -5,6 +5,18 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+
+def _last_at(rows: list[dict], field: str, at_ms: int) -> int:
+    """Rightmost index whose ``field`` is <= ``at_ms``, or 0 when none qualify."""
+    lo, hi = 0, len(rows)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if rows[mid][field] <= at_ms:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
 from supere.board.engine import analyze
 from supere.board.fresh import crosscheck, judge, kline_status
 from supere.board.settings import AnalysisConfig
@@ -79,7 +91,8 @@ def snapshot_at(fixture: dict, at_ms: int, analysis: AnalysisConfig) -> dict:
     for interval, bars in fixture["frames"].items():
         if interval == "1m":
             continue
-        closed = [bar for bar in bars if bar["close_time"] <= at_ms][-limit:]
+        end = _last_at(bars, "close_time", at_ms)
+        closed = bars[max(0, end - limit):end]
         latest = closed[-1]["close_time"] if closed else None
         status = kline_status(latest, at_ms, INTERVAL_MS[interval], grace)
         klines[interval] = {
@@ -90,7 +103,8 @@ def snapshot_at(fixture: dict, at_ms: int, analysis: AnalysisConfig) -> dict:
             "label": "" if latest is None else format_utc8(latest, "%H:%M:%S"),
             "bars": closed if status == "ok" else closed,
         }
-    metrics = [row for row in fixture["metrics"] if row["known_at"] <= at_ms][-limit:]
+    end = _last_at(fixture["metrics"], "known_at", at_ms)
+    metrics = fixture["metrics"][max(0, end - limit):end]
     if metrics:
         known = metrics[-1]["known_at"]
         status = "ok" if at_ms - known <= analysis.board.stale.metrics_minutes * 60_000 else "stale"

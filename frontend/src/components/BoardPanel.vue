@@ -73,6 +73,10 @@ function statusClass(status) {
   return "wait";
 }
 
+function rText(value) {
+  return value == null || !Number.isFinite(Number(value)) ? "" : `${Number(value).toFixed(2)}R`;
+}
+
 function levelText(levels) {
   return (levels || [])
     .map((level) => `${px(level.price)}(${level.label || level.sources?.[0] || ""}·测${level.touches || 0})`)
@@ -152,7 +156,8 @@ function levelText(levels) {
 
       <h2>情景计划</h2>
       <p class="fine">{{ view.plans_meta?.generated_utc8 }} 生成，{{ view.plans_meta?.valid_bars }} 根 15m 内有效</p>
-      <p v-if="view.plans_meta?.paused" class="board-alert">{{ view.plans_meta.pause_reason || "情景计划暂停" }}</p>
+      <p v-if="view.plans_meta?.paused" class="board-alert">{{ view.plans_meta.pause_reason || view.plans_meta.session_note || "情景计划暂停" }}</p>
+      <p v-if="view.backtest_gate?.label" class="fine">{{ view.backtest_gate.label }}</p>
       <article v-for="(plan, index) in view.plans || []" :key="plan.id" class="board-plan">
         <p>
           <strong>{{ index + 1 }}. {{ plan.title }}</strong>
@@ -160,10 +165,19 @@ function levelText(levels) {
           <button v-if="plan.id !== 'flip'" type="button" @click="emit('focus', plan.id)">图上看</button>
         </p>
         <p v-if="plan.id !== 'flip'" class="fine">
+          {{ plan.kind }}
+          <span v-if="plan.r != null"> · R {{ px(plan.r) }}</span>
+          <span v-if="rText(plan.t1_r)"> · T1 {{ rText(plan.t1_r) }}</span>
+          <span v-if="rText(plan.t2_r)"> · T2 {{ rText(plan.t2_r) }}</span>
+          <span v-if="plan.hold_until_utc8"> · 最长持仓到 {{ plan.hold_until_utc8 }}</span>
+        </p>
+        <p v-if="plan.id !== 'flip'" class="fine">
           进场 {{ px(plan.entry_low) }}–{{ px(plan.entry_high) }}
           止损 {{ px(plan.stop) }}
           <span v-for="(target, targetIndex) in plan.targets" :key="target"> T{{ targetIndex + 1 }} {{ px(target) }}</span>
         </p>
+        <p v-if="plan.expectancy_text" class="fine">{{ plan.expectancy_text }}</p>
+        <p v-if="plan.backtest_note" class="fine">{{ plan.backtest_note }}</p>
         <p v-if="plan.note" class="fine">{{ plan.note }}</p>
         <p v-if="planCalc(plan)" class="fine" :class="{ bad: planCalc(plan).warnings.length }">
           名义 {{ money(planCalc(plan).notional) }} U · 保证金 {{ money(planCalc(plan).margin) }} U
@@ -185,6 +199,10 @@ function levelText(levels) {
         <p class="fine">逐仓，维持保证金率 0.5%。强平价是估算。</p>
       </div>
 
+      <p v-if="view.profile === 'intraday_v2'" class="fine">
+        系统通知{{ view.notify?.system ? "开" : "关" }}
+        <span v-if="view.notify?.eligible">（回测已达标，仍需手动打开）</span>
+      </p>
       <h2>风控</h2>
       <p>
         今日连亏

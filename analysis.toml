@@ -4,6 +4,8 @@
 [board]
 port = 8770
 symbol = "ETHUSDT"
+# intraday_v2 是短线日内。改成 "v1" 就回到原来的四条情景计划。
+profile = "intraday_v2"
 bars = 300
 warmup_bars = 600
 recompute_on = "5m_close"
@@ -132,3 +134,44 @@ weekend_days = ["Sat", "Sun"]
 [notify]
 system = false
 cooldown_minutes = 30
+
+# 短线日内 v2。analysis.local.toml 可以覆盖任意一项。
+# 时段边界按左闭右开：15:00 归欧洲，20:30 归美国，02:00 起不再算美国。
+# 选定组 90 天合计里三个时段的期望都是负的，所以默认全关。analysis.local.toml 可以打开。
+[intraday]
+counter_rsi_long = 25
+counter_rsi_short = 75
+counter_vol_mult = 2.0
+counter_vol_window = 20
+counter_per_day = 1
+range_width_min_atr = 1.5
+range_width_max_atr = 4.0
+range_stop_atr = 0.5
+t1_min_r = 1.2
+t2_min_r = 2.0
+trail_ema = 20
+breakout_direct_atr = 0.2
+breakout_vol_mult = 1.5
+breakout_vol_window = 20
+breakout_direct_stop_atr = 0.5
+time_stop_bars = 8
+time_stop_min_r = 0.5
+max_hold_hours = 4
+no_new_after = "01:00"
+flat_by = "02:00"
+day_loss_r = 3
+max_open = 1
+slippage_ticks = 1
+stop_extra_ticks = 1
+fee_rate = 0.0005
+tick = 0.01
+
+[intraday.session]
+asia = ["08:00", "15:00"]
+europe = ["15:00", "20:30"]
+us = ["20:30", "02:00"]
+
+[intraday.session_enabled]
+asia = false
+europe = false
+us = false

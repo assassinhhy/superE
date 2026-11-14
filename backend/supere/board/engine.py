@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from supere.board.gate_v2 import GATE
 from supere.board.indicators import last_value, pack_bars
+from supere.board.intraday import v2_conclusion
 from supere.board.levels import build_levels
 from supere.board.plans import build_plans
 from supere.board.range_ import build_range
@@ -321,6 +323,13 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
         atr=atr15,
         params=analysis.levels,
     )
+    risk = assess(
+        int(snapshot.get("now_ms") or 0),
+        snapshot.get("events") or [],
+        snapshot.get("calendar") or [],
+        analysis.risk,
+    )
+    event_block = any(item.get("blocking") for item in risk.get("events") or [])
     plans, meta = build_plans(
         bias=bias,
         price=price,
@@ -328,6 +337,13 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
         rng=rng,
         packs=packs,
         analysis=analysis,
+        frames={"1h": h1, "4h": h4},
+        now_ms=int(snapshot.get("now_ms") or 0),
+        metrics=snapshot.get("metrics") or {},
+        book=snapshot.get("book") or {},
+        daily_rsi=None if daily is None else daily.get("value"),
+        weekend=bool(risk.get("weekend")),
+        event_block=event_block,
     )
     if rng and rng.get("blocked"):
         meta["position_blocked"] = True
@@ -344,16 +360,31 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
     side = "short" if direction == "空头" else "long" if direction == "多头" else None
     chase = _chase(side, levels, bars15)
     conclusion = _conclusion(trend, rng, chase, side)
-    if sentiment["status"] != "ok" and any(word in conclusion["text"] for word in ("爆仓", "堆仓", "新空", "新多", "回补")):
-        conclusion["text"] = conclusion["text"]
-    risk = assess(
-        int(snapshot.get("now_ms") or 0),
-        snapshot.get("events") or [],
-        snapshot.get("calendar") or [],
-        analysis.risk,
-    )
+    profile = analysis.board.profile
+    gate = GATE if profile != "v1" else {"passed": False, "eligible": False, "failed": [], "by_kind": {}, "label": ""}
+    if profile != "v1":
+        extra = []
+        if meta.get("session_note"):
+            extra.append(meta["session_note"])
+        if any(plan.get("status") == "空间不够" for plan in plans):
+            extra.append("空间不够")
+        conclusion["text"] = v2_conclusion(conclusion["text"], h1, h4, extra)
+        if not gate.get("passed"):
+            for plan in plans:
+                if plan.get("kind") != "翻转":
+                    plan["backtest_note"] = "未通过回测，仅供参考"
+        for plan in plans:
+            stats = (gate.get("by_kind") or {}).get(plan.get("kind") or "")
+            if stats and stats.get("expectancy") is not None:
+                plan["expectancy_r"] = stats["expectancy"]
+                plan["expectancy_text"] = f"按回测这类单的期望 {stats['expectancy']:+.2f}R"
+        risk["notes"].insert(0, f"当天亏损到 {analysis.intraday.day_loss_r:g}R 或连亏 {analysis.risk.loss_streak_stop} 笔就停，同时只拿 1 笔")
+        risk["day_loss_r"] = analysis.intraday.day_loss_r
+        risk["max_open"] = analysis.intraday.max_open
     meta["generated_utc8"] = format_utc8(int(snapshot.get("now_ms") or 0), "%H:%M")
+    passed = bool(gate.get("passed"))
     return {
+        "profile": profile,
         "symbol": snapshot.get("symbol") or analysis.board.symbol,
         "as_of": snapshot.get("now_ms"),
         "as_of_utc8": snapshot.get("now_utc8") or format_utc8(int(snapshot.get("now_ms") or 0)),
@@ -383,4 +414,18 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
             "1h": last_value(packs["1h"]["atr"]) if packs.get("1h") else None,
         },
         "disclaimer": DISCLAIMER,
+        "notify": {
+            "system": bool(analysis.notify.system),
+            "eligible": passed,
+            "cooldown_minutes": analysis.notify.cooldown_minutes,
+        },
+        "backtest_gate": {
+            "passed": passed,
+            "eligible": passed,
+            "failed": list(gate.get("failed") or []),
+            "label": "" if passed or profile == "v1" else (gate.get("label") or "未通过回测，仅供参考"),
+            "selected": gate.get("selected"),
+            "by_kind": gate.get("by_kind") or {},
+            "by_session": gate.get("by_session") or {},
+        },
     }
