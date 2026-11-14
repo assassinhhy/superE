@@ -60,8 +60,26 @@ a { color: var(--brass); }
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 420px;
 }
+.side-tabs { display: flex; align-items: center; gap: 0.35rem; margin-bottom: 0.45rem; }
+.side-clock { margin-left: auto; color: var(--muted); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.board-alert { margin: 0 0 0.4rem; padding: 0.3rem 0.4rem; background: #3a2420; color: var(--down); }
+.board-conclusion { margin: 0.15rem 0; line-height: 1.45; }
+.board-list { margin: 0; padding-left: 1rem; font-size: 0.78rem; }
+.board-list li { margin: 0.15rem 0; }
+.board-meta { color: var(--muted); font-size: 0.68rem; margin-left: 0.3rem; }
+.board-tech { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+.board-tech th, .board-tech td { text-align: left; padding: 0.1rem 0.2rem; }
+.board-plan { border-top: 1px solid var(--line); padding: 0.3rem 0; }
+.board-plan p { margin: 0.15rem 0; }
+.board-calc { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.35rem 0; }
+.board-calc input { width: 4.6rem; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 4px; padding: 0.15rem 0.3rem; }
+.wait { color: var(--muted); }
+.ready { color: var(--warn); }
+.bad { color: var(--down); }
+.hot { color: var(--warn); }
+.board-disclaimer { margin-top: 0.8rem; color: var(--muted); font-size: 0.75rem; }
 .chart-pane { min-height: 0; display: flex; flex-direction: column; }
 .toolrow {
   padding: 0.35rem 0.6rem;

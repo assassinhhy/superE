@@ -35,6 +35,7 @@ export async function loadOlderSeries(fetchPage, timeKey, until, maxPages = 8) {
 
 // News is its own process. The page on 8766 calls it directly so 8766 stays up.
 export const NEWS_ORIGIN = "http://127.0.0.1:8769";
+export const BOARD_ORIGIN = "http://127.0.0.1:8770";
 
 function newsURL(path, params) {
   const q = params ? `?${query(params)}` : "";

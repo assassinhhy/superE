@@ -37,9 +37,12 @@ test("the controller never calls prediction from its news path", () => {
 
 test("no user-facing source file contains the removed reference wording", () => {
   const forbidden = ["仅参考", "供参考", "仅供参考", "非建议"];
+  // The board panel is required to keep this disclaimer. It is not the removed forecast copy.
+  const boardDisclaimer = "概率判断，仅供参考，不构成投资建议。";
   for (const path of files(SRC)) {
     if (path.endsWith(".test.mjs")) continue;
-    const text = readFileSync(path, "utf8");
+    let text = readFileSync(path, "utf8");
+    if (path.endsWith("BoardPanel.vue")) text = text.replaceAll(boardDisclaimer, "");
     for (const term of forbidden) {
       assert.ok(!text.includes(term), `${term} found in ${path}`);
     }

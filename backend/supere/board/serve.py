@@ -41,17 +41,18 @@ def create_app(
     schedule: bool = False,
     fetcher: BoardFetcher | None = None,
     clock=None,
+    frozen: dict | None = None,
 ) -> FastAPI:
     root = Path(data_root)
-    owns_fetcher = fetcher is None
-    if fetcher is None:
+    owns_fetcher = fetcher is None and frozen is None
+    if fetcher is None and frozen is None:
         fetcher = BoardFetcher(analysis, root, proxy=proxy, clock=clock)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         stop = threading.Event()
         thread = None
-        if schedule:
+        if schedule and fetcher is not None:
             def loop() -> None:
                 while not stop.wait(1.0):
                     try:
@@ -85,10 +86,14 @@ def create_app(
 
     @app.get("/api/board/data")
     def board_data():
+        if frozen is not None:
+            return {"frozen": True, "as_of_utc8": frozen.get("as_of_utc8")}
         return fetcher.view()
 
     @app.get("/api/board")
     def board():
+        if frozen is not None:
+            return frozen
         snap = fetcher.view()
         snap["calendar"] = load_calendar(root / "board" / "calendar.csv")
         return analyze(snap, analysis)
@@ -107,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int)
     parser.add_argument("--analysis")
     parser.add_argument("--config")
+    parser.add_argument("--fixture", help="回放 CSV 目录。和 --at 一起用时不访问外网")
+    parser.add_argument("--at", help="回放时刻，UTC+8，格式 YYYY-MM-DD HH:MM")
     args = parser.parse_args(argv)
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("只允许本机回环地址", file=sys.stderr)
@@ -126,13 +133,30 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    frozen = None
+    schedule = True
+    proxy = proxy_or_none(cfg.proxy.url)
+    if args.fixture or args.at:
+        if not args.fixture or not args.at:
+            print("回放需要同时给出 --fixture 和 --at", file=sys.stderr)
+            return 2
+        from datetime import datetime
+
+        from supere.board.replay import replay_at
+        from supere.timeutil import UTC8
+
+        moment = datetime.strptime(args.at, "%Y-%m-%d %H:%M").replace(tzinfo=UTC8)
+        frozen = replay_at(Path(args.fixture), int(moment.timestamp() * 1000), analysis)
+        schedule = False
+        proxy = None
     try:
         uvicorn.run(
             create_app(
                 root,
                 analysis,
-                proxy=proxy_or_none(cfg.proxy.url),
-                schedule=True,
+                proxy=proxy,
+                schedule=schedule,
+                frozen=frozen,
             ),
             host=args.host,
             port=port,

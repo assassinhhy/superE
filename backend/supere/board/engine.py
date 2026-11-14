@@ -378,5 +378,9 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
         "risk": risk,
         "conclusion": conclusion,
         "bullets": _bullets(sentiment, rng, packs),
+        "atr": {
+            "15m": atr15,
+            "1h": last_value(packs["1h"]["atr"]) if packs.get("1h") else None,
+        },
         "disclaimer": DISCLAIMER,
     }

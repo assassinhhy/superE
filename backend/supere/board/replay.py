@@ -8,6 +8,7 @@ from pathlib import Path
 from supere.board.engine import analyze
 from supere.board.fresh import crosscheck, judge, kline_status
 from supere.board.settings import AnalysisConfig
+from supere.board.snapshot import ticker_from_bars
 from supere.intervals import INTERVAL_MS
 from supere.timeutil import format_utc8
 
@@ -106,12 +107,23 @@ def snapshot_at(fixture: dict, at_ms: int, analysis: AnalysisConfig) -> dict:
         price = klines["5m"]["bars"][-1]["close"]
         price_ts = klines["5m"]["bars"][-1]["close_time"]
     price_view = judge(price, price_ts, price_ts, "K 线", at_ms, INTERVAL_MS["5m"] + grace)
+    base = klines.get("5m", {}).get("bars") or klines.get("15m", {}).get("bars") or []
+    ticker = ticker_from_bars(base, at_ms) if base else None
+    ticker_status = klines["5m"]["status"] if klines.get("5m", {}).get("bars") else (
+        klines["15m"]["status"] if klines.get("15m", {}).get("bars") else "missing"
+    )
     return {
         "symbol": analysis.board.symbol,
         "now_ms": int(at_ms),
         "now_utc8": format_utc8(int(at_ms)),
         "price": price_view,
-        "ticker": {"value": None, "status": "missing", "source": ""},
+        "ticker": {
+            "value": ticker,
+            "status": "missing" if ticker is None else ticker_status,
+            "source": "K 线" if ticker else "",
+            "data_ts": None if ticker is None else ticker["data_ts"],
+            "utc8": None if ticker is None else format_utc8(ticker["data_ts"], "%H:%M:%S"),
+        },
         "klines": klines,
         "metrics": {
             "status": status,
