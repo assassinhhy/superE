@@ -114,7 +114,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_launch_returns
 .venv\Scripts\python.exe -m supere board
 ```
 
-它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。
+它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。三个月回测：
+
+```bat
+python scripts\board_backtest.py --download --start 2026-08-16 --end 2026-11-13 --out board-backtest.md
+```
+
+家里如果拉不到 data.binance.vision，就用 `--fixture` 指向本机导出的 CSV 目录。说明写在脚本开头。
 
 启动脚本会拉起三个进程：
 
