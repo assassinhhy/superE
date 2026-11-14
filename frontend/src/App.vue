@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import BoardPanel from "./components/BoardPanel.vue";
 import ChartPane from "./components/ChartPane.vue";
 import NewsView from "./components/NewsView.vue";
 import SettingsDrawer from "./components/SettingsDrawer.vue";
@@ -7,17 +8,21 @@ import SidePanel from "./components/SidePanel.vue";
 import StatusBar from "./components/StatusBar.vue";
 import Toasts from "./components/Toasts.vue";
 import TrainView from "./components/TrainView.vue";
+import { startBoardDesk } from "./board.js";
 import { INTERVALS, formatUtc8, isBackfilling } from "./indicators.js";
 import { startLive, state } from "./live.js";
 import { bootNotify } from "./notify.js";
 import { startSignalDesk } from "./signalDesk.js";
 
 const tab = ref("market");
+const side = ref("board");
 const market = ref("um");
 const interval = ref("15m");
 const settings = ref(false);
 const clock = ref(formatUtc8(Date.now()));
 const divergence = ref(false);
+const focusPlan = ref("");
+const board = reactive({ view: null, offline: false, error: "" });
 
 try {
   divergence.value = localStorage.getItem("supere.divergence") === "1";
@@ -49,6 +54,7 @@ onMounted(() => {
   bootNotify();
   startLive();
   startSignalDesk(() => divergence.value);
+  startBoardDesk(board);
   setInterval(() => {
     clock.value = formatUtc8(Date.now());
   }, 1000);
@@ -89,8 +95,27 @@ onMounted(() => {
     <p v-if="state.error" class="banner warn">{{ state.error }}</p>
 
     <main v-if="tab === 'market'" class="desk">
-      <ChartPane :market="market" :interval="interval" />
-      <SidePanel :market="market" :divergence="divergence" @divergence="setDivergence" />
+      <ChartPane :market="market" :interval="interval" :board="board.view" :focus-plan="focusPlan" />
+      <aside class="side">
+        <div class="side-tabs">
+          <button type="button" :class="{ on: side === 'board' }" @click="side = 'board'">盘面</button>
+          <button type="button" :class="{ on: side === 'signal' }" @click="side = 'signal'">信号</button>
+          <span class="side-clock">{{ clock.slice(11, 19) }} UTC+8</span>
+        </div>
+        <BoardPanel
+          v-show="side === 'board'"
+          :view="board.view"
+          :offline="board.offline"
+          :error="board.error"
+          @focus="focusPlan = $event"
+        />
+        <SidePanel
+          v-show="side === 'signal'"
+          :market="market"
+          :divergence="divergence"
+          @divergence="setDivergence"
+        />
+      </aside>
     </main>
     <NewsView v-else-if="tab === 'news'" />
     <TrainView v-else />

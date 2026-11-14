@@ -17,6 +17,7 @@ cc_run.log
 # 数据、密钥、本机配置
 data/
 config.local.toml
+analysis.local.toml
 .env
 .env.*
 *.sqlite

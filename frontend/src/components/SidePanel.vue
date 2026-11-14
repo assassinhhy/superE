@@ -35,7 +35,7 @@ function toggleDivergence() {
 </script>
 
 <template>
-  <aside class="side">
+  <div class="side-body">
     <section>
       <h2>实时</h2>
       <p class="px">{{ price }}</p>
@@ -89,5 +89,5 @@ function toggleDivergence() {
         </li>
       </ul>
     </section>
-  </aside>
+  </div>
 </template>

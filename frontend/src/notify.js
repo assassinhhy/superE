@@ -60,6 +60,11 @@ export function systemBridgeReady() {
   return typeof globalThis.pywebview?.api?.notify === "function";
 }
 
+/** Existing signal notices still ask for a balloon. Board plans pass system: false. */
+export function wantsSystemNotice(notice) {
+  return notice?.system !== false;
+}
+
 function beep(tone) {
   const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
   if (!Ctx) return;
@@ -108,6 +113,6 @@ export function pushNotice(notice) {
   if (!result.fresh) return false;
   for (const fn of listeners) fn(notice);
   if (state.sound) beep(notice?.tone);
-  systemNotify(notice);
+  if (wantsSystemNotice(notice)) systemNotify(notice);
   return true;
 }

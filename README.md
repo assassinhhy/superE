@@ -71,7 +71,7 @@ npm run build
 
 预览库在 `data/preview`，API 进程只读打开它。页面上会标明这是预览数据。
 
-「行情」页：合约 15 个周期的 K 线，现货参考只有 1 分钟。主图可单独开关 MA20、MA50 和 BOLL。副图可单独开关 RSI(14)、MACD 和 ATR。时间轴固定 UTC+8。画线用 KLineChart 自带覆盖物：水平线、趋势线、射线、平行通道、斐波那契回撤、价格标注，可点选删除或一键清除，按交易对和周期存在本机，刷新后还在。右侧是信号通知，只在 K 线收盘时判断 5 分钟、15 分钟、1 小时和 4 小时。页面内会弹出提示，提示音可以关掉。Windows 桌面窗口另外会发一条气球通知。
+「行情」页：合约 15 个周期的 K 线，现货参考只有 1 分钟。主图可单独开关 MA20、MA50 和 BOLL。副图可单独开关 RSI(14)、MACD 和 ATR。时间轴固定 UTC+8。画线用 KLineChart 自带覆盖物：水平线、趋势线、射线、平行通道、斐波那契回撤、价格标注，可点选删除或一键清除，按交易对和周期存在本机，刷新后还在。右侧有「盘面 / 信号」两个页签，默认停在盘面。盘面读 `127.0.0.1:8770`，服务没开时只显示「盘面服务未启动」，信号页签照常。信号只在 K 线收盘时判断 5 分钟、15 分钟、1 小时和 4 小时。页面内会弹出提示，提示音可以关掉。Windows 桌面窗口另外会发一条气球通知。
 
 「消息」页读 `127.0.0.1:8769`，不经过预测进程，也不需要重启 8766。每 5 分钟抓一次，已经打过分的条目按内容哈希复用，不重复花模型额度。手动刷新有 60 秒冷却。
 
@@ -107,6 +107,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_launch_returns
 ```
 
 它听 `127.0.0.1:8769`。数据目录用配置里的那个，和采集器同一份库。模型密钥仍只读环境变量 `SUPERE_LLM_BASE_URL`、`SUPERE_LLM_API_KEY`、`SUPERE_LLM_MODEL`，没配 key 时用规则兜底。界面改完后在 `frontend` 里 `pnpm build`，再刷新桌面窗口；静态文件是 8766 从磁盘读的，一般不用重启 API。要系统气球通知时，只重启桌面窗口（`python -m supere desktop`），让它带上通知桥。
+
+盘面分析是另一个进程，不写主库，也不下单：
+
+```bat
+.venv\Scripts\python.exe -m supere board
+```
+
+它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。三个月回测：
+
+```bat
+python scripts\board_backtest.py --download --start 2026-08-16 --end 2026-11-13 --out board-backtest.md
+```
+
+家里如果拉不到 data.binance.vision，就用 `--fixture` 指向本机导出的 CSV 目录。说明写在脚本开头。
 
 启动脚本会拉起三个进程：
 

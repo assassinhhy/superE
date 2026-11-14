@@ -2,9 +2,13 @@
 import { dispose, init, registerIndicator } from "klinecharts";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../api.js";
+import { BOARD_INTERVALS, registerBoardOverlays } from "../boardOverlays.js";
 import {
+  BOARD_GROUP,
   DRAW_TOOLS,
+  USER_GROUP,
   drawingKey,
+  isUserOverlay,
   loadBook,
   saveBook,
 } from "../drawings.js";
@@ -28,9 +32,18 @@ import {
 const props = defineProps({
   market: { type: String, required: true },
   interval: { type: String, required: true },
+  board: { type: Object, default: null },
+  focusPlan: { type: String, default: "" },
 });
 
 const STORE = "supere.drawings.v1";
+const BOARD_TOGGLE = "supere.board.overlay";
+const boardOn = ref(true);
+try {
+  boardOn.value = localStorage.getItem(BOARD_TOGGLE) !== "0";
+} catch {
+  boardOn.value = true;
+}
 const scrollEl = ref(null);
 const host = ref(null);
 const message = ref("");
@@ -131,6 +144,7 @@ function loader() {
         const rows = (body.bars || []).map(toBar).filter((bar) => Number.isFinite(bar.timestamp));
         message.value = rows.length ? "" : "这个周期本地还没有 K 线";
         callback(rows, { forward: rows.length >= 500, backward: false });
+        paintBoard();
       } catch {
         message.value = "K 线没有读出来";
         callback([], { forward: false, backward: false });
@@ -239,7 +253,8 @@ function overlayHooks() {
 
 function persist() {
   if (!chart || !bookKey || restoring) return;
-  writeStore(saveBook(readStore(), bookKey, chart.getOverlays?.() || []));
+  const overlays = (chart.getOverlays?.() || []).filter(isUserOverlay);
+  writeStore(saveBook(readStore(), bookKey, overlays));
 }
 
 function persistSoon() {
@@ -251,11 +266,12 @@ function applyBook(key) {
   if (!chart) return;
   restoring = true;
   bookKey = key;
-  chart.removeOverlay({});
+  chart.removeOverlay({ groupId: USER_GROUP });
   for (const row of loadBook(readStore(), key)) {
     chart.createOverlay({
       name: row.name,
       id: row.id || undefined,
+      groupId: USER_GROUP,
       points: row.points,
       ...overlayHooks(),
     });
@@ -265,7 +281,7 @@ function applyBook(key) {
 }
 
 function draw(name) {
-  chart?.createOverlay({ name, ...overlayHooks() });
+  chart?.createOverlay({ name, groupId: USER_GROUP, ...overlayHooks() });
 }
 
 function deleteSelected() {
@@ -278,10 +294,55 @@ function deleteSelected() {
 function clearDrawings() {
   if (!chart) return;
   restoring = true;
-  chart.removeOverlay({});
+  chart.removeOverlay({ groupId: USER_GROUP });
   restoring = false;
   selectedId.value = "";
   persist();
+}
+
+function toggleBoard() {
+  boardOn.value = !boardOn.value;
+  try {
+    localStorage.setItem(BOARD_TOGGLE, boardOn.value ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  paintBoard();
+}
+
+function paintBoard() {
+  if (!chart) return;
+  chart.removeOverlay({ groupId: BOARD_GROUP });
+  const view = props.board;
+  if (!boardOn.value || !BOARD_INTERVALS.has(props.interval) || !view) return;
+  const stamp = Date.now();
+  const levels = [
+    ...(view.levels?.resistance || []).map((level) => ({ ...level, side: "resistance" })),
+    ...(view.levels?.support || []).map((level) => ({ ...level, side: "support" })),
+  ];
+  for (const level of levels) {
+    chart.createOverlay({
+      name: "boardLevel",
+      groupId: BOARD_GROUP,
+      lock: true,
+      points: [{ timestamp: stamp, value: level.price }],
+      extendData: level,
+    });
+  }
+  for (const plan of view.plans || []) {
+    if (plan.id === "flip" || plan.entry_low == null || plan.entry_high == null) continue;
+    chart.createOverlay({
+      name: "boardZone",
+      groupId: BOARD_GROUP,
+      lock: true,
+      points: [
+        { timestamp: stamp, value: plan.entry_high },
+        { timestamp: stamp, value: plan.entry_low },
+      ],
+      extendData: { ...plan, highlight: props.focusPlan === plan.id },
+    });
+  }
+  if (props.focusPlan) chart.scrollToRealTime?.();
 }
 
 function onKey(event) {
@@ -314,6 +375,7 @@ function onLive() {
 
 onMounted(() => {
   registerCustom();
+  registerBoardOverlays();
   chart = init(host.value, {
     locale: "zh-CN",
     timezone: "Asia/Shanghai",
@@ -375,6 +437,7 @@ onMounted(() => {
   mountIndicators();
   chart.setDataLoader(loader());
   applyBook(drawingKey(props.market, props.interval));
+  paintBoard();
   reflow();
   resizeObserver = new ResizeObserver(() => reflow());
   resizeObserver.observe(scrollEl.value);
@@ -387,6 +450,7 @@ watch(() => props.interval, (id) => {
   const period = periodOf(id);
   chart?.setPeriod({ span: period.span, type: period.type });
   applyBook(drawingKey(props.market, id));
+  paintBoard();
 });
 
 watch(() => props.market, (market) => {
@@ -398,7 +462,10 @@ watch(() => props.market, (market) => {
     volumePrecision: 3,
   });
   applyBook(drawingKey(market, props.interval));
+  paintBoard();
 });
+
+watch(() => [props.board, props.focusPlan, boardOn.value], () => paintBoard());
 
 watch(() => state.seq, onLive);
 
@@ -441,6 +508,8 @@ onBeforeUnmount(() => {
       </button>
       <button type="button" :disabled="!selectedId" @click="deleteSelected">删除</button>
       <button type="button" @click="clearDrawings">清除</button>
+      <span class="split">盘面</span>
+      <button type="button" :class="{ on: boardOn }" @click="toggleBoard">盘面标注</button>
     </div>
     <p v-if="message" class="chart-note">{{ message }}</p>
     <div ref="scrollEl" class="chart-scroll">

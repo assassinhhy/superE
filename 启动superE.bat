@@ -25,6 +25,9 @@ ping 127.0.0.1 -n 3 >nul
 echo starting api on 127.0.0.1:8766
 "%PY%" -m supere detach api
 if errorlevel 1 echo failed to detach api & exit /b 1
+echo starting board on 127.0.0.1:8770
+"%PY%" -m supere detach board
+if errorlevel 1 echo failed to detach board
 echo starting window
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PY%' -ArgumentList '-m','supere','desktop' -WorkingDirectory '%CD%' -WindowStyle Normal -RedirectStandardOutput '%CD%\data\logs\desktop.stdout.log' -RedirectStandardError '%CD%\data\logs\desktop.stderr.log'" <nul
 echo superE started. API http://127.0.0.1:8766/api/health

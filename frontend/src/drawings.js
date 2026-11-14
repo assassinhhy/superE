@@ -18,11 +18,28 @@ const MIN_POINTS = {
   priceLine: 1,
 };
 
+export const USER_GROUP = "user";
+export const BOARD_GROUP = "board";
+
 export function drawingKey(market, interval) {
   return `${market}|ETHUSDT|${interval}`;
 }
 
+export function isUserOverlay(overlay) {
+  if (!overlay || overlay.groupId === BOARD_GROUP) return false;
+  return Boolean(MIN_POINTS[overlay.name]);
+}
+
+export function persistableOverlays(overlays) {
+  return (overlays || []).map(serializeOverlay).filter(Boolean);
+}
+
+export function withoutGroup(overlays, groupId) {
+  return (overlays || []).filter((overlay) => overlay?.groupId !== groupId);
+}
+
 export function serializeOverlay(overlay) {
+  if (overlay?.groupId === BOARD_GROUP) return null;
   const name = overlay?.name;
   const need = MIN_POINTS[name];
   if (!need) return null;
