@@ -46,6 +46,8 @@ class BoardSection(BaseModel):
     warmup_bars: int = 600
     recompute_on: str = "5m_close"
     price_refresh_seconds: int = 15
+    # ``intraday_v2`` is the short-term profile. ``v1`` keeps the original plans.
+    profile: str = "intraday_v2"
     endpoints: BoardEndpoints = Field(default_factory=BoardEndpoints)
     poll: BoardPoll = Field(default_factory=BoardPoll)
     backoff: BoardBackoff = Field(default_factory=BoardBackoff)
@@ -162,6 +164,51 @@ class NotifySection(BaseModel):
     cooldown_minutes: int = 30
 
 
+class SessionHours(BaseModel):
+    asia: list[str] = Field(default_factory=lambda: ["08:00", "15:00"])
+    europe: list[str] = Field(default_factory=lambda: ["15:00", "20:30"])
+    us: list[str] = Field(default_factory=lambda: ["20:30", "02:00"])
+
+
+class SessionEnabled(BaseModel):
+    asia: bool = True
+    europe: bool = True
+    us: bool = True
+
+
+class IntradaySection(BaseModel):
+    """Thresholds for the short-term profile. Every field can be overridden."""
+
+    counter_rsi_long: float = 25
+    counter_rsi_short: float = 75
+    counter_vol_mult: float = 2.0
+    counter_vol_window: int = 20
+    counter_per_day: int = 1
+    range_width_min_atr: float = 1.5
+    range_width_max_atr: float = 4.0
+    range_stop_atr: float = 0.5
+    t1_min_r: float = 1.2
+    t2_min_r: float = 2.0
+    trail_ema: int = 20
+    breakout_direct_atr: float = 0.2
+    breakout_vol_mult: float = 1.5
+    breakout_vol_window: int = 20
+    breakout_direct_stop_atr: float = 0.5
+    time_stop_bars: int = 6
+    time_stop_min_r: float = 0.5
+    max_hold_hours: float = 4
+    no_new_after: str = "01:00"
+    flat_by: str = "02:00"
+    day_loss_r: float = 3
+    max_open: int = 1
+    slippage_ticks: int = 1
+    stop_extra_ticks: int = 1
+    fee_rate: float = 0.0005
+    tick: float = 0.01
+    session: SessionHours = Field(default_factory=SessionHours)
+    session_enabled: SessionEnabled = Field(default_factory=SessionEnabled)
+
+
 class AnalysisConfig(BaseModel):
     board: BoardSection = Field(default_factory=BoardSection)
     indicators: IndicatorSection = Field(default_factory=IndicatorSection)
@@ -174,6 +221,7 @@ class AnalysisConfig(BaseModel):
     calc: CalcSection = Field(default_factory=CalcSection)
     risk: RiskSection = Field(default_factory=RiskSection)
     notify: NotifySection = Field(default_factory=NotifySection)
+    intraday: IntradaySection = Field(default_factory=IntradaySection)
 
 
 def _merge(base: dict, override: dict) -> dict:

@@ -107,7 +107,7 @@ def _confirmed(side: str, zone: tuple[float, float], packs: dict, analysis, atr:
     return seen
 
 
-def build_plans(
+def _build_plans_v1(
     *,
     bias: str,
     price: float | None,
@@ -294,3 +294,43 @@ def build_plans(
                 if plan["id"] != "flip":
                     plan["status"] = "已作废"
     return plans, meta
+
+
+def build_plans(
+    *,
+    bias: str,
+    price: float | None,
+    levels: dict,
+    rng: dict | None,
+    packs: dict,
+    analysis,
+    frames: dict | None = None,
+    now_ms: int = 0,
+    metrics: dict | None = None,
+    book: dict | None = None,
+    daily_rsi: float | None = None,
+    weekend: bool = False,
+    event_block: bool = False,
+) -> tuple[list[dict], dict]:
+    """``v1`` keeps the original four plans. The default profile is the intraday rewrite."""
+    if getattr(analysis.board, "profile", "intraday_v2") == "v1":
+        return _build_plans_v1(
+            bias=bias, price=price, levels=levels, rng=rng, packs=packs, analysis=analysis
+        )
+    from supere.board.intraday import build_plans_v2
+
+    return build_plans_v2(
+        bias=bias,
+        price=price,
+        levels=levels,
+        rng=rng,
+        packs=packs,
+        analysis=analysis,
+        frames=frames,
+        now_ms=now_ms,
+        metrics=metrics,
+        book=book,
+        daily_rsi=daily_rsi,
+        weekend=weekend,
+        event_block=event_block,
+    )
