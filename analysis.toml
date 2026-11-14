@@ -1,0 +1,134 @@
+# 盘面分析默认参数。本机覆盖写 analysis.local.toml（不提交）。
+# 止损系数按阿B 2026-11-14 口径：止损 = 进场区外侧 + max(a×ATR15m, b×ATR1h)，默认 a=0.5、b=0.35。
+
+[board]
+port = 8770
+symbol = "ETHUSDT"
+bars = 300
+warmup_bars = 600
+recompute_on = "5m_close"
+price_refresh_seconds = 15
+
+[board.endpoints]
+binance = "https://www.binance.com"
+okx_ticker = "https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP"
+
+[board.poll]
+oi_seconds = 60
+okx_seconds = 60
+metrics_fallback_after_minutes = 12
+funding_fallback_after_seconds = 120
+
+[board.backoff]
+first_seconds = 60
+max_seconds = 900
+ban_extra_seconds = 30
+ban_parse_fail_seconds = 600
+
+[board.stale]
+oi_seconds = 180
+metrics_minutes = 12
+funding_seconds = 120
+okx_seconds = 180
+kline_grace_seconds = 90
+
+[board.crosscheck]
+max_diff_pct = 0.3
+
+[indicators]
+ema = [20, 50, 200]
+rsi = 14
+macd = [12, 26, 9]
+atr = 14
+
+[trend]
+frames = ["1h", "4h"]
+tangle_pct = 0.15
+daily_rsi_ob = 70
+daily_rsi_os = 30
+macd_fade_bars = 2
+
+[sentiment]
+frame = "15m"
+lookback_bars = 4
+dp_pct = 0.3
+doi_pct = 0.3
+global_lsr_crowded_long = 3.0
+global_lsr_crowded_short = 0.8
+funding_hot_abs = 0.0003
+funding_neutral_abs = 0.00005
+vol_spike_mult = 3.0
+vol_spike_window = 20
+taker_sell = 0.7
+taker_buy = 1.4
+
+[levels]
+frame = "15m"
+also_1h = false
+merge_atr = 0.5
+swing_lookback = 48
+fractal_wing = 3
+wick_body_mult = 2.0
+wick_atr_mult = 1.0
+round_step = 50
+ma_levels = ["15m:EMA20", "15m:EMA50", "1h:EMA20", "1h:EMA50", "4h:EMA20"]
+touch_atr = 0.2
+touch_window_bars = 96
+nearest_each_side = 3
+day_start_utc8 = "00:00"
+# 5m 插针并入 15m 关键位。15m 合成 K 会把 5m 长影稀释掉（2026-11-13 13:55 的 1893.39）。
+include_5m_wicks = true
+wick_5m_lookback = 288
+
+[range]
+bars = 12
+shrink_recent = 4
+shrink_base = 16
+shrink_ratio = 0.6
+upper_pct = 25
+lower_pct = 25
+structure_swings = 3
+
+[plans]
+max_plans = 4
+entry_band_atr = 0.3
+stop_atr15 = 0.5
+stop_atr1h_factor = 0.35
+breakout_retest_atr = 0.2
+breakout_stop_atr = 0.6
+counter_size_ratio = 0.5
+flip_closes_15m = 2
+flip_closes_1h = 1
+flip_closes_4h = 1
+valid_bars_15m = 4
+
+[confirm]
+frames = ["5m", "15m"]
+wick_body_mult = 1.5
+wick_atr_mult = 0.5
+rsi_short_from = 60
+rsi_long_from = 40
+rsi_lookback_bars = 6
+
+[calc]
+capital_u = 100
+max_loss_u = 4
+max_loss_pct = 0
+leverage = 20
+leverage_max = 50
+margin_mode = "isolated"
+mmr = 0.005
+taker_fee = 0.0005
+liq_min_atr = 1.0
+fee_min_mult = 3
+rr_min = 1.0
+
+[risk]
+loss_streak_stop = 3
+event_window_minutes = 15
+event_kinds = ["CPI", "PPI", "NFP", "FOMC"]
+weekend_days = ["Sat", "Sun"]
+
+[notify]
+system = false
+cooldown_minutes = 30

@@ -14,15 +14,16 @@ function files(dir) {
   });
 }
 
-test("SidePanel has no timer and only calls prediction from the click handler", () => {
+test("the desk shows signals and news, and no prediction control", () => {
   const panel = readFileSync(join(SRC, "components", "SidePanel.vue"), "utf8");
-  assert.ok(!/setInterval|setTimeout/.test(panel));
-  assert.ok(!/WebSocket/.test(panel));
-  const mounted = panel.match(/onMounted\(\(\) => \{([\s\S]*?)\}\);/);
-  assert.ok(mounted, "onMounted block present");
-  assert.match(mounted[1], /loadCachedNews/);
-  assert.ok(!/runPredict|predictOnClick|api\.predict/.test(mounted[1]));
-  assert.match(panel, /@click="runPredict"/);
+  const app = readFileSync(join(SRC, "App.vue"), "utf8");
+  const news = readFileSync(join(SRC, "components", "NewsView.vue"), "utf8");
+  const visible = panel + app + news;
+  assert.match(panel, /信号通知/);
+  assert.match(news, /setInterval\(load, NEWS_POLL_MS\)/);
+  assert.match(news, /@click="refresh"/);
+  assert.ok(!/runPredict|predictOnClick|模型原值|加消息面后/.test(visible));
+  assert.ok(!/买卖盘|盘口价/.test(panel));
 });
 
 test("the controller never calls prediction from its news path", () => {
@@ -36,9 +37,12 @@ test("the controller never calls prediction from its news path", () => {
 
 test("no user-facing source file contains the removed reference wording", () => {
   const forbidden = ["仅参考", "供参考", "仅供参考", "非建议"];
+  // The board panel is required to keep this disclaimer. It is not the removed forecast copy.
+  const boardDisclaimer = "概率判断，仅供参考，不构成投资建议。";
   for (const path of files(SRC)) {
     if (path.endsWith(".test.mjs")) continue;
-    const text = readFileSync(path, "utf8");
+    let text = readFileSync(path, "utf8");
+    if (path.endsWith("BoardPanel.vue")) text = text.replaceAll(boardDisclaimer, "");
     for (const term of forbidden) {
       assert.ok(!text.includes(term), `${term} found in ${path}`);
     }

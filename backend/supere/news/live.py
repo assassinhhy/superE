@@ -1,14 +1,14 @@
-"""Click-time news fetch.  Runs only when the user clicks 预测.
+"""News fetch for the hourly refresh and the manual refresh endpoint.
 
-The collector may cache news in the background, but this module is the
-foreground path: fetch now -> score -> aggregate -> overlay -> model call.
-Every source is isolated: a timeout, HTTP error or malformed feed is recorded
-and skipped, never raised into the forecast path.
+Prediction reads the cache this module fills. A single bad source is recorded
+and skipped; it is never raised into the forecast path. GDELT is not on this
+path (historical backfill only).
 """
 
 from __future__ import annotations
 
 import html
+import os
 import re
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -17,10 +17,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from supere.news.dedup import url_hash
+from supere.news.dedup import same_text, simhash64, url_hash
 from supere.news.scoring import PROXY, content_hash
 from supere.storage.db import Database
 
@@ -29,28 +30,56 @@ BINANCE_URL = (
     "?type=1&pageNo=1&pageSize=20"
 )
 BINANCE_CATALOGS = {48, 49, 51, 128, 157, 161}
+_GOOGLE_QUERY = '("ethereum" OR "ether" OR "ETH ETF" OR vitalik OR "spot ether") when:1d'
+GOOGLE_NEWS_URL = (
+    "https://news.google.com/rss/search?q="
+    + quote_plus(_GOOGLE_QUERY)
+    + "&hl=en-US&gl=US&ceid=US:en"
+)
+# Crypto-native feeds first. Google is a capped supplement, not the main source.
 RSS_SOURCES = (
-    ("google_news_eth", "https://news.google.com/rss/search?q=ethereum+OR+ETH+crypto&hl=en-US&gl=US&ceid=US:en"),
-    ("cointelegraph", "https://cointelegraph.com/rss"),
     ("coindesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("cointelegraph", "https://cointelegraph.com/rss"),
     ("decrypt", "https://decrypt.co/feed"),
+    ("theblock", "https://www.theblock.co/rss.xml"),
+    ("google_news_eth", GOOGLE_NEWS_URL),
 )
 PROXY_DEFAULT = PROXY
-MAX_AGE_MS = 48 * 3_600_000
-MAX_ITEMS = 80
+MAX_AGE_MS = 24 * 3_600_000
+MAX_ITEMS = 60
+GOOGLE_MAX_ITEMS = 12
+_PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 
 ETH_WORDS = {
     "eth", "ethereum", "ether", "vitalik", "beacon", "staking", "staker", "layer 2",
     "layer2", "l2", "defi", "erc-20", "erc20", "eip", "ethusdt", "现货", "以太坊",
 }
+ETH_ONLY_TOKENS = {"eth", "ethereum", "ether", "vitalik", "ethusdt"}
+OTHER_ASSETS = {
+    "bitcoin", "btc", "solana", "sol", "xrp", "ripple", "doge", "dogecoin", "bnb",
+    "cardano", "ada", "avalanche", "avax",
+}
+_DROP_QUERY = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id", "oc", "ref"}
 # Broad crypto/market-wide items are kept only when they can plausibly move ETH
 # through a macro, regulatory, exchange or liquidity channel.  Generic "crypto"
 # headlines from the Google feed were too noisy for an ETH panel.
 MACRO_WORDS = {
     "fed", "fomc", "cpi", "inflation", "rate", "tariff", "sec", "etf", "hack",
-    "exploit", "security incident", "liquidation", "regulation", "lawsuit",
-    "crash", "plunge", "rally", "surge",
+    "exploit", "security incident", "liquidation", "liquidations", "regulation", "lawsuit",
+    "crash", "plunge", "rally", "surge", "usd", "dollar", "dxy",
 }
+# Bitcoin, ETF flows and liquidations can move ETH even when the headline never says ETH.
+BROAD_CRYPTO = {"bitcoin", "btc", "etf", "liquidation", "liquidations"}
+# Sources this refresh path writes. The panel and overlay ignore anything else
+# (historical GDELT rows live in the same database and must not be shown).
+PANEL_SOURCES = frozenset({
+    "binance_announcement",
+    "coindesk",
+    "cointelegraph",
+    "decrypt",
+    "theblock",
+    "google_news",
+})
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 
@@ -95,21 +124,89 @@ def _parse_time(value: str | None) -> int | None:
     return int(dt.timestamp() * 1000)
 
 
-def _relevant(title: str, body: str) -> bool:
+def resolve_proxy(explicit: str | None = None) -> str | None:
+    """Proxy for news HTTP calls.
+
+    An explicit empty string forces a direct connection. Otherwise the first
+    non-empty ``HTTPS_PROXY`` / ``HTTP_PROXY`` (either case) wins, then
+    ``explicit``, then the local default ``http://127.0.0.1:7890``.
+    """
+    if explicit == "":
+        return None
+    for name in _PROXY_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    if explicit:
+        return explicit
+    return PROXY
+
+
+def _eth_hit(text: str, tokens: set[str], *, strict: bool) -> bool:
+    if strict:
+        if tokens & ETH_ONLY_TOKENS:
+            return True
+    elif tokens & ETH_WORDS or tokens & ETH_ONLY_TOKENS:
+        return True
+    if "以太坊" in text or "以太币" in text:
+        return True
+    return any(phrase in text for phrase in ("eip-", "erc-20", "erc20", "ethusdt"))
+
+
+def _relevant(title: str, body: str, *, eth_only: bool = False) -> bool:
     text = f"{title} {body}".lower()
     tokens = set(re.findall(r"[a-z0-9]+|[一-鿿]+", text))
-    return bool(tokens & ETH_WORDS) or bool(tokens & MACRO_WORDS)
+    eth = _eth_hit(text, tokens, strict=eth_only)
+    if eth_only:
+        return eth
+    if eth:
+        return True
+    if tokens & BROAD_CRYPTO or any(phrase in text for phrase in ("比特币", "清算", "资金流", "美联储", "通胀", "美元")):
+        return True
+    if tokens & MACRO_WORDS:
+        return True
+    if tokens & OTHER_ASSETS:
+        return False
+    return False
 
 
 def _client(proxy: str | None, timeout: float) -> httpx.Client:
-    return httpx.Client(
-        proxy=proxy,
-        timeout=httpx.Timeout(timeout),
-        follow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/131.0 Safari/537.36"},
-    )
+    kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(timeout),
+        "follow_redirects": True,
+        "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/131.0 Safari/537.36"},
+    }
+    if proxy:
+        kwargs["proxy"] = proxy
+    return httpx.Client(**kwargs)
+
+
+def canonical_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=False)
+        if key.lower() not in _DROP_QUERY and not key.lower().startswith("utm_")
+    ]
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.lower(), host, path, urlencode(query), ""))
+
+
+def limit_source(name: str, rows: list[dict]) -> list[dict]:
+    if name == "google_news_eth":
+        return rows[:GOOGLE_MAX_ITEMS]
+    return rows
 
 
 def _fetch_binance(proxy: str | None, timeout: float, now_ms: int) -> list[dict]:
@@ -139,7 +236,7 @@ def _fetch_binance(proxy: str | None, timeout: float, now_ms: int) -> list[dict]
                 published = None
             if published is not None and now_ms - published > MAX_AGE_MS:
                 continue
-            if not _relevant(title, ""):
+            if not _relevant(title, "", eth_only=True):
                 continue
             out.append({
                 "source": "binance_announcement",
@@ -153,7 +250,7 @@ def _fetch_binance(proxy: str | None, timeout: float, now_ms: int) -> list[dict]
     return out
 
 
-def _rss_items(name: str, raw: bytes, now_ms: int) -> list[dict]:
+def _rss_items(name: str, raw: bytes, now_ms: int, *, eth_only: bool = False) -> list[dict]:
     root = ET.fromstring(raw)
     out: list[dict] = []
     nodes = root.findall(".//item")
@@ -185,7 +282,7 @@ def _rss_items(name: str, raw: bytes, now_ms: int) -> list[dict]:
             continue
         if published is not None and now_ms - published > MAX_AGE_MS:
             continue
-        if not _relevant(title, body):
+        if not _relevant(title, body, eth_only=eth_only):
             continue
         if name == "google_news_eth" and source_name:
             # Google titles carry a " - Publisher" suffix; keep the title readable.
@@ -193,7 +290,7 @@ def _rss_items(name: str, raw: bytes, now_ms: int) -> list[dict]:
                 title = title[: -(len(source_name) + 3)].strip()
         out.append({
             "source": name if name != "google_news_eth" else "google_news",
-            "source_tier": 2,
+            "source_tier": 3 if name == "google_news_eth" else 2,
             "lang": "en",
             "title": title,
             "body": body,
@@ -207,31 +304,61 @@ def _fetch_rss(name: str, url: str, proxy: str | None, timeout: float, now_ms: i
     with _client(proxy, timeout) as client:
         response = client.get(url)
         response.raise_for_status()
-        return _rss_items(name, response.content, now_ms)
+        rows = _rss_items(name, response.content, now_ms, eth_only=False)
+        return limit_source(name, rows)
+
+
+def _title_tokens(title: str) -> set[str]:
+    text = re.sub(r"\s+-\s+[^-]+$", "", (title or "").lower())
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]{2,}|[一-鿿]{2,}", text):
+        tokens.add(token)
+        if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            tokens.add(token[:-1])
+    return tokens
+
+
+def titles_similar(left: str, right: str) -> bool:
+    """Same event: high token overlap, or a close simhash plus shared tokens."""
+    a = _title_tokens(left)
+    b = _title_tokens(right)
+    if not a or not b:
+        return False
+    overlap = len(a & b) / len(a | b)
+    if overlap >= 0.72:
+        return True
+    if overlap >= 0.5 and same_text(simhash64(left), simhash64(right)):
+        return True
+    return False
 
 
 def _dedupe(items: list[dict]) -> list[dict]:
-    out: list[dict] = []
+    """Keep one row per URL and per similar title. Prefer the higher-tier source."""
+    ordered = sorted(items, key=lambda row: (
+        int(row.get("source_tier") or 9),
+        -len(str(row.get("body") or "")),
+        -(row.get("ts_published") or 0),
+    ))
+    kept: list[dict] = []
     urls: set[str] = set()
-    titles: set[str] = set()
-    for item in sorted(items, key=lambda row: (-(row.get("ts_published") or 0), row.get("title") or "")):
-        url = str(item.get("url") or "").strip()
-        title = re.sub(r"\W+", "", str(item.get("title") or "").lower())[:120]
+    for item in ordered:
+        url = canonical_url(str(item.get("url") or ""))
+        title = str(item.get("title") or "")
         if url and url in urls:
             continue
-        if title and title in titles:
+        if any(titles_similar(title, str(prev.get("title") or "")) for prev in kept):
             continue
         if url:
             urls.add(url)
-        if title:
-            titles.add(title)
-        out.append(item)
-    return out
+        kept.append(item)
+    kept.sort(key=lambda row: (-(row.get("ts_published") or 0), str(row.get("title") or "")))
+    return kept
 
 
-def fetch_now(now_ms: int, *, proxy: str | None = PROXY_DEFAULT, timeout: float = 7.0,
+def fetch_now(now_ms: int, *, proxy: str | None = None, timeout: float = 8.0,
               max_workers: int = 6) -> dict:
     """Fetch all sources concurrently.  Never raises for a single bad source."""
+    proxy = resolve_proxy(proxy)
     report = FetchReport()
     collected: list[dict] = []
     tasks: list[tuple[str, Any]] = [("binance_announcement", lambda: _fetch_binance(proxy, timeout, now_ms))]

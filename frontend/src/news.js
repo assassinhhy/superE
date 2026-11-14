@@ -29,7 +29,13 @@ const SOURCE_CN = {
   coindesk: "CoinDesk",
   cointelegraph: "Cointelegraph",
   decrypt: "Decrypt",
+  theblock: "The Block",
 };
+
+export const NEWS_FILTERS = ["全部", "利多", "利空", "中性", "只看重要"];
+export const NEWS_POLL_MS = 30 * 1000;
+export const NEWS_PAGE = 15;
+export const NEWS_FOLD_MS = 6 * 60 * 60 * 1000;
 
 export function sourceLabel(source) {
   const name = String(source || "unknown");
@@ -43,23 +49,54 @@ export function urgencyLabel(urgency) {
   return "低";
 }
 
-export function formatNewsRow(item) {
+export function relativeTime(ts, nowMs) {
+  if (!finite(ts) || !finite(nowMs)) return "时间未知";
+  const diff = Math.max(0, Number(nowMs) - Number(ts));
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+export function awaitingTranslation(item) {
+  const scorer = String(item?.scored_by || item?.scoredBy || "");
+  return scorer === "rule" || scorer === "rule_fallback";
+}
+
+export function formatNewsRow(item, nowMs = Date.now()) {
   const direction = finite(item?.direction) ? Number(item.direction) : 0;
   const title = item?.title || "(无标题)";
-  const summary = String(item?.summary_zh || item?.summary || "").trim();
+  const awaiting = awaitingTranslation(item);
+  const summaryText = String(item?.summary_zh || item?.summary || "").trim();
+  const summary = awaiting
+    ? "翻译中"
+    : (summaryText || `${title}。当前只有标题信息，具体细节和影响仍不确定。`);
+  const ts = finite(item?.ts_published) ? Number(item.ts_published)
+    : finite(item?.available_at) ? Number(item.available_at) : null;
+  const importance = finite(item?.importance) ? Number(item.importance) : (isUrgent(item) ? 3 : 1);
+  const urgent = isUrgent(item) || importance >= 3;
   return {
     id: item?.id,
     time: item?.available_at_utc8 || item?.ts_published_utc8 || item?.ts_ingested_utc8 || "—",
+    ts,
+    relative: relativeTime(ts, nowMs),
     source: sourceLabel(item?.source),
     title,
     url: item?.url || "",
     direction,
     directionClass: directionClass(direction),
     directionLabel: item?.sentiment_label || directionLabel(direction),
-    summary: summary || `${title}。当前只有标题信息，具体细节和影响仍不确定。`,
+    summary,
+    awaiting,
+    reason: awaiting ? "" : String(item?.reason_zh || "").trim(),
+    impact: awaiting ? "" : String(item?.impact_zh || "").trim(),
+    importance,
+    urgent,
+    important: importance >= 2 || urgent,
     urgency: finite(item?.urgency) ? Number(item.urgency) : 0,
     urgencyLabel: urgencyLabel(item?.urgency),
-    urgent: isUrgent(item),
     eventType: item?.event_type || "",
     scoredBy: item?.scored_by || "",
     scoreVersion: item?.score_version || "",
@@ -68,8 +105,94 @@ export function formatNewsRow(item) {
   };
 }
 
-export function formatNewsRows(items) {
-  return (items || []).map(formatNewsRow);
+export function formatNewsRows(items, nowMs = Date.now()) {
+  return (items || []).map((item) => formatNewsRow(item, nowMs));
+}
+
+export function filterNews(rows, mode, source = "全部") {
+  let out = rows || [];
+  if (mode === "利多" || mode === "利空" || mode === "中性") {
+    out = out.filter((row) => row.directionLabel === mode);
+  } else if (mode === "只看重要") {
+    out = out.filter((row) => row.important);
+  } else {
+    out = out.slice();
+  }
+  if (source && source !== "全部") out = out.filter((row) => row.source === source);
+  return out;
+}
+
+export function overviewSentence(summary) {
+  if (!summary) return "近 1 小时和近 24 小时都还没有足够的消息。";
+  const piece = (bias, counts) => {
+    const row = counts || {};
+    return `${bias || "中性"}，利多 ${row.positive || 0} 条、利空 ${row.negative || 0} 条、中性 ${row.neutral || 0} 条`;
+  };
+  return `近 1 小时${piece(summary.bias_1h, summary.counts_1h)}；近 24 小时${piece(summary.bias_24h, summary.counts_24h)}。`;
+}
+
+export function isAlertNews(row) {
+  return Boolean(row?.urgent) && (row.directionLabel === "利多" || row.directionLabel === "利空");
+}
+
+export function urgentBrief(rows) {
+  const hot = (rows || []).filter(isAlertNews).slice(0, 3);
+  if (!hot.length) return "";
+  const text = hot.map((row) => String(row.impact || row.summary || "").trim()).filter(Boolean).join("");
+  return text || `${hot.length} 条高紧急消息。`;
+}
+
+export function importantRows(rows, limit = 5) {
+  return (rows || [])
+    .filter((row) => row.important)
+    .sort((a, b) => (b.importance - a.importance) || ((b.ts || 0) - (a.ts || 0)))
+    .slice(0, limit);
+}
+
+export function layoutNews(rows, nowMs, { limit = NEWS_PAGE, showOlder = false } = {}) {
+  const recent = [];
+  const older = [];
+  for (const row of rows || []) {
+    if (row?.ts && Number(nowMs) - Number(row.ts) > NEWS_FOLD_MS) older.push(row);
+    else recent.push(row);
+  }
+  const shownRecent = recent.slice(0, limit);
+  return {
+    rows: showOlder ? shownRecent.concat(older) : shownRecent,
+    hiddenRecent: Math.max(0, recent.length - shownRecent.length),
+    olderCount: older.length,
+    olderHidden: showOlder ? 0 : older.length,
+  };
+}
+
+export function refreshCountdown(nextAtMs, nowMs) {
+  if (!finite(nextAtMs) || !finite(nowMs)) return "—";
+  const total = Math.floor((Number(nextAtMs) - Number(nowMs)) / 1000);
+  if (total <= 0) return "即将刷新";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`;
+  if (minutes > 0) return `${minutes} 分 ${seconds} 秒`;
+  return `${seconds} 秒`;
+}
+
+export function refreshButtonState({ refreshing = false, cooldownUntilMs = 0, cooldownRemainingSec = 0, nowMs = Date.now() } = {}) {
+  if (refreshing) return { disabled: true, spinning: true, label: "刷新中" };
+  const until = Number(cooldownUntilMs) || 0;
+  const remain = until > 0
+    ? Math.max(0, Math.ceil((until - Number(nowMs)) / 1000))
+    : Math.max(0, Math.ceil(Number(cooldownRemainingSec) || 0));
+  if (remain > 0) return { disabled: true, spinning: false, label: `${remain} 秒后可刷新` };
+  return { disabled: false, spinning: false, label: "刷新" };
+}
+
+export function summaryHeadline(summary) {
+  if (!summary) return "最近 1 小时暂无消息";
+  if (summary.headline) return String(summary.headline);
+  const counts = summary.counts_1h || {};
+  const bias = summary.bias_1h || "中性";
+  return `最近 1 小时${bias} · 利多 ${counts.positive || 0} / 利空 ${counts.negative || 0} / 中性 ${counts.neutral || 0}`;
 }
 
 export function summaryLine(summary) {

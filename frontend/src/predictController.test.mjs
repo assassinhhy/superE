@@ -78,6 +78,32 @@ test("a failed news fetch during a click keeps the cached news panel", async () 
   assert.match(controller.state.newsError, /新闻超时/);
 });
 
+test("refresh updates the panel and a cooldown blocks a second fetch", async () => {
+  const api = fakeApi();
+  api.calls.refresh = 0;
+  api.refreshNews = async () => {
+    api.calls.refresh += 1;
+    return {
+      items: [{ id: 3, title: "ETH hack", summary_zh: "以太坊相关安全事件。", sentiment_label: "利空" }],
+      summary: { headline: "最近 1 小时偏空 · 利多 0 / 利空 1 / 中性 0" },
+      cooldown_remaining_s: 60,
+      refreshing: false,
+      last_refresh_at: 1_700_000_000_000,
+      next_refresh_at: 1_700_003_600_000,
+      sources: { coindesk: { ok: true, count: 1, error: null } },
+    };
+  };
+  const controller = createPredictController({ api, intervals: ["1h"] });
+  const payload = await controller.refreshNews();
+  assert.equal(api.calls.predict, 0);
+  assert.equal(api.calls.refresh, 1);
+  assert.equal(payload.items[0].id, 3);
+  assert.equal(controller.state.news.cooldownRemainingSec, 60);
+  assert.ok(controller.state.news.cooldownUntilMs > Date.now());
+  await controller.refreshNews();
+  assert.equal(api.calls.refresh, 1);
+});
+
 test("a failed click keeps the previous rows and shows an error", async () => {
   const api = fakeApi();
   const controller = createPredictController({ api, intervals: ["1h"] });

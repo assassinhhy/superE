@@ -23,8 +23,8 @@ export const PREDICT_INTERVALS = ["5m", "15m", "30m", "1h", "4h"];
 
 /** Each period is its own main-pane instance. KLineChart's built-in MA would draw them as one indicator. */
 export const MA_LINES = [
-  { id: "MA15", period: 15, color: "#FF9600" },
-  { id: "MA25", period: 25, color: "#935EBD" },
+  { id: "MA20", period: 20, color: "#d7a15f" },
+  { id: "MA50", period: 50, color: "#7eb6d9" },
 ];
 
 /** Sub panes keep this height. The chart body grows and the pane scrolls instead of crushing them. */

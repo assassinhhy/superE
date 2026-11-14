@@ -174,7 +174,7 @@ def test_news_api_has_alert_and_summaries(tmp_path: Path):
     now = int(time.time() * 1000)
     db.insert_news({
         "ts_published": now - 1000, "ts_ingested": now - 1000, "ts_local": now - 1000,
-        "source": "test", "source_tier": 2, "lang": "en", "title": "Ethereum ETF inflow",
+        "source": "coindesk", "source_tier": 2, "lang": "en", "title": "Ethereum ETF inflow",
         "body": "", "url": "u", "url_hash": "h", "text_simhash": "0", "status": "scored",
         "available_at": now - 1000, "timing_quality": "ingested",
         "direction_score": 0.9, "eth_relevance": 0.9, "urgency": 0.8,
@@ -246,7 +246,7 @@ def test_rss_parser_extracts_eth_items_only():
       <description>Nothing relevant here.</description>
       <pubDate>Wed, 05 Nov 2026 10:00:00 GMT</pubDate></item>
     </channel></rss>"""
-    # 用与 RSS pubDate 同一时刻的 now，避免 MAX_AGE_MS（48 小时）随真实时间过期。
+    # 用与 RSS pubDate 同一时刻的 now，避免 MAX_AGE_MS（24 小时）随真实时间过期。
     from datetime import datetime, timezone
 
     now_ms = int(datetime(2026, 11, 5, 10, 5, tzinfo=timezone.utc).timestamp() * 1000)

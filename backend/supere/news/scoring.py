@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 
 from supere import secrets
+from supere.news.summary import market_channel
 from supere.storage.db import Database
 
 SCORER_VERSION = "ds-v2"
@@ -77,6 +78,10 @@ class Score:
     confidence: float
     scorer: str
     summary_zh: str = ""
+    label: str = ""
+    reason_zh: str = ""
+    importance: int = 0
+    impact_zh: str = ""
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -125,6 +130,49 @@ def content_hash(title: str, body: str = "") -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def ensure_display_fields(score: Score) -> Score:
+    """Fill label, reason and importance when a scorer left them blank."""
+    if score.label not in ("利多", "利空", "中性"):
+        score.label = sentiment_label(score.direction)
+    if not score.reason_zh:
+        score.reason_zh = EVENT_WHY.get(score.event_type, EVENT_WHY["general"])
+    if score.importance not in (1, 2, 3):
+        if score.urgency >= 0.7:
+            score.importance = 3
+        elif score.urgency >= 0.45:
+            score.importance = 2
+        else:
+            score.importance = 1
+    if score.importance >= 2 and not score.impact_zh:
+        score.impact_zh = score.summary_zh
+    return score
+
+
+def stored_score_fields(score: Score, digest: str, version: str) -> dict:
+    """Columns written for one scored row. Never includes credentials."""
+    ensure_display_fields(score)
+    return {
+        "direction": int(1 if score.direction > 0.15 else (-1 if score.direction < -0.15 else 0)),
+        "direction_score": score.direction,
+        "impact": int(round(score.urgency * 3)),
+        "eth_relevance": score.eth_relevance,
+        "urgency": score.urgency,
+        "magnitude": score.magnitude,
+        "event_type": score.event_type,
+        "confidence": score.confidence,
+        "scored_by": score.scorer,
+        "score_version": version,
+        "content_hash": digest,
+        "summary_zh": score.summary_zh,
+        "sentiment_label": score.label or sentiment_label(score.direction),
+        "reason_zh": score.reason_zh,
+        "importance": int(score.importance or 1),
+        "impact_zh": score.impact_zh,
+        "score_json": json.dumps(asdict(score), ensure_ascii=False),
+        "status": "scored",
+    }
+
+
 def rule_summary_zh(title: str, event_type: str, direction: float, urgency: float,
                    relevance: float) -> str:
     """Fallback summary written from the headline only; never invents facts."""
@@ -156,10 +204,14 @@ def rule_score(title: str, body: str = "") -> Score:
             event = name
             break
     direction = _clip(direction, -1, 1)
-    return Score(eth_relevance=round(relevance, 3), direction=round(direction, 3),
-                 urgency=round(urgency, 3), magnitude=round(magnitude, 3),
-                 event_type=event, confidence=0.35, scorer="rule_fallback",
-                 summary_zh=rule_summary_zh(title, event, direction, urgency, relevance))
+    if market_channel(title, body):
+        relevance = max(relevance, 0.55)
+    return ensure_display_fields(Score(
+        eth_relevance=round(relevance, 3), direction=round(direction, 3),
+        urgency=round(urgency, 3), magnitude=round(magnitude, 3),
+        event_type=event, confidence=0.35, scorer="rule_fallback",
+        summary_zh=rule_summary_zh(title, event, direction, urgency, relevance),
+    ))
 
 
 def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
@@ -184,6 +236,10 @@ def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
                 confidence=_clip(float(row.get("confidence", 0.5)), 0, 1),
                 scorer="deepseek",
                 summary_zh=str(row.get("summary_zh", "") or "").strip(),
+                label=str(row.get("label", "") or "").strip()[:8],
+                reason_zh=str(row.get("reason_zh", "") or "").strip()[:400],
+                importance=int(row.get("importance") or 0),
+                impact_zh=str(row.get("impact_zh", "") or "").strip()[:400],
             )
         except (TypeError, ValueError):
             continue
@@ -277,25 +333,13 @@ def score_pending(db_path: Path, *, limit: int = 2000, batch_size: int = 10,
                         str(row.get("title") or ""), item.event_type, item.direction,
                         item.urgency, item.eth_relevance,
                     )
-                fields = {
-                    "available_at": _visible_at(row),
-                    "timing_quality": _timing_quality(row),
-                    "direction": int(1 if item.direction > 0.15 else (-1 if item.direction < -0.15 else 0)),
-                    "direction_score": item.direction,
-                    "impact": int(round(item.urgency * 3)),
-                    "eth_relevance": item.eth_relevance,
-                    "urgency": item.urgency,
-                    "magnitude": item.magnitude,
-                    "event_type": item.event_type,
-                    "confidence": item.confidence,
-                    "scored_by": item.scorer,
-                    "score_version": f"{SCORER_VERSION}:{PROMPT_VERSION}",
-                    "content_hash": content_hash(str(row.get("title") or ""), str(row.get("body") or "")),
-                    "summary_zh": item.summary_zh,
-                    "sentiment_label": sentiment_label(item.direction),
-                    "score_json": json.dumps(asdict(item), ensure_ascii=False),
-                    "status": "scored",
-                }
+                fields = stored_score_fields(
+                    item,
+                    content_hash(str(row.get("title") or ""), str(row.get("body") or "")),
+                    f"{SCORER_VERSION}:{PROMPT_VERSION}",
+                )
+                fields["available_at"] = _visible_at(row)
+                fields["timing_quality"] = _timing_quality(row)
                 db.update_news_score(int(row["id"]), fields)
         return counts
     finally:
@@ -304,6 +348,14 @@ def score_pending(db_path: Path, *, limit: int = 2000, batch_size: int = 10,
 
 def score_version() -> str:
     return f"{SCORER_VERSION}:{PROMPT_VERSION}"
+
+
+def _row_value(row, name: str, default):
+    try:
+        value = row[name]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if value is None else value
 
 
 def _score_from_row(row) -> Score:
@@ -323,6 +375,10 @@ def _score_from_row(row) -> Score:
         confidence=float(row["confidence"] if row["confidence"] is not None else raw.get("confidence", 0.35)),
         scorer=str(row["scored_by"] or raw.get("scorer", "rule_fallback")),
         summary_zh=str(row["summary_zh"] or raw.get("summary_zh", "") or ""),
+        label=str(_row_value(row, "sentiment_label", "") or raw.get("label", "") or ""),
+        reason_zh=str(_row_value(row, "reason_zh", "") or raw.get("reason_zh", "") or ""),
+        importance=int(_row_value(row, "importance", 0) or raw.get("importance") or 0),
+        impact_zh=str(_row_value(row, "impact_zh", "") or raw.get("impact_zh", "") or ""),
     )
 
 
@@ -396,29 +452,14 @@ def score_items(db_path: Path, items: list[dict], *, use_deepseek: bool = True,
                 result[ch] = score
                 news_id = item.get("id")
                 if news_id is not None:
-                    db.update_news_score(int(news_id), {
-                        "direction": int(1 if score.direction > 0.15 else (-1 if score.direction < -0.15 else 0)),
-                        "direction_score": score.direction,
-                        "impact": int(round(score.urgency * 3)),
-                        "eth_relevance": score.eth_relevance,
-                        "urgency": score.urgency,
-                        "magnitude": score.magnitude,
-                        "event_type": score.event_type,
-                        "confidence": score.confidence,
-                        "scored_by": score.scorer,
-                        "score_version": version,
-                        "content_hash": ch,
-                        "summary_zh": score.summary_zh,
-                        "sentiment_label": sentiment_label(score.direction),
-                        "score_json": json.dumps(asdict(score), ensure_ascii=False),
-                        "status": "scored",
-                    })
+                    db.update_news_score(int(news_id), stored_score_fields(score, ch, version))
         return {"scores": result, "counts": counts, "version": version}
     finally:
         db.close()
 
 
-def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) -> list[dict]:
+def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None,
+              sources: tuple[str, ...] | None = None) -> list[dict]:
     """Read-only view for ``/api/news``. Missing columns degrade to defaults."""
     path = Path(db_path)
     if not path.exists():
@@ -438,15 +479,23 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
         summary = "COALESCE(summary_zh, '')" if "summary_zh" in cols else "''"
         label = "COALESCE(sentiment_label, '')" if "sentiment_label" in cols else "''"
         content = "COALESCE(content_hash, '')" if "content_hash" in cols else "''"
+        reason = "COALESCE(reason_zh, '')" if "reason_zh" in cols else "''"
+        importance = "COALESCE(importance, 0)" if "importance" in cols else "0"
+        impact = "COALESCE(impact_zh, '')" if "impact_zh" in cols else "''"
         relevance = "COALESCE(eth_relevance, 0.0)"
         where = "1=1"
         args: list = []
         if since_ms is not None:
             where += f" AND {avail} >= ?"
             args.append(int(since_ms))
+        if sources:
+            marks = ",".join("?" for _ in sources)
+            where += f" AND source IN ({marks})"
+            args.extend(sources)
         sql = (f"SELECT id, {avail} AS available_at, ts_published, ts_ingested, source, title, url, "
                f"{relevance}, {direction}, {urgency}, {magnitude}, {event}, {timing}, "
-               f"COALESCE(scored_by,''), COALESCE(score_version,''), {summary}, {label}, {content} "
+               f"COALESCE(scored_by,''), COALESCE(score_version,''), {summary}, {label}, {content}, "
+               f"{reason}, {importance}, {impact} "
                f"FROM news WHERE {where} ORDER BY available_at DESC, id DESC LIMIT ?")
         rows = conn.execute(sql, (*args, int(limit))).fetchall()
     finally:
@@ -454,5 +503,34 @@ def list_news(db_path: Path, *, limit: int = 50, since_ms: int | None = None) ->
     keys = ["id", "available_at", "ts_published", "ts_ingested", "source", "title", "url",
             "relevance", "direction", "urgency", "magnitude", "event_type",
             "timing_quality", "scored_by", "score_version", "summary_zh",
-            "sentiment_label", "content_hash"]
+            "sentiment_label", "content_hash", "reason_zh", "importance", "impact_zh"]
+    return [dict(zip(keys, row, strict=True)) for row in rows]
+
+
+def pending_llm_items(db_path: Path, sources: tuple[str, ...], since_ms: int, *,
+                      limit: int = 10) -> list[dict]:
+    """Panel-source rows still on the rule fallback, oldest gap first within the window.
+
+    GDELT and already-scored model rows are not returned. The caller rate-limits.
+    """
+    path = Path(db_path)
+    if not path.exists() or not sources:
+        return []
+    marks = ",".join("?" for _ in sources)
+    uri = f"file:{path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        rows = conn.execute(
+            f"""SELECT id, title, body, url, source, content_hash, ts_published, available_at
+                FROM news
+                WHERE source IN ({marks})
+                  AND COALESCE(ts_published, available_at, ts_ingested) >= ?
+                  AND (scored_by IS NULL OR scored_by IN ('', 'pending', 'rule', 'rule_fallback'))
+                ORDER BY COALESCE(ts_published, available_at, ts_ingested) DESC
+                LIMIT ?""",
+            (*sources, int(since_ms), int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+    keys = ["id", "title", "body", "url", "source", "content_hash", "ts_published", "available_at"]
     return [dict(zip(keys, row, strict=True)) for row in rows]

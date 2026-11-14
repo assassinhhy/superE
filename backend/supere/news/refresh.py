@@ -1,0 +1,412 @@
+"""News refresh every five minutes, plus a manual refresh with a cooldown.
+
+The schedule follows Asia/Singapore (UTC+8, no daylight saving). A refresh
+runs once when the service starts, then at each 5-minute boundary. Manual
+refresh waits 60 seconds between accepted calls and never overlaps another
+refresh. A one-hour cache remains only for the unused prediction click path.
+
+Items that already have a model score are not sent again: the scorer looks
+them up by content hash. The optional prose digest is also skipped when the
+same scored set comes back.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+import threading
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Callable
+from zoneinfo import ZoneInfo
+
+from supere import secrets
+from supere.news import live
+from supere.news.scoring import pending_llm_items
+from supere.news.summary import in_main_feed
+from supere.timeutil import format_utc8
+
+log = logging.getLogger("supere.news.refresh")
+
+try:
+    SGT = ZoneInfo("Asia/Singapore")
+except Exception:  # pragma: no cover - tzdata is present on the runtime image
+    SGT = ZoneInfo("Etc/GMT-8")
+
+STALE_MS = 3_600_000
+COOLDOWN_MS = 60_000
+REFRESH_MS = 5 * 60 * 1000
+# One batch at a time, then a pause, so backfill does not share the model quota in a burst.
+BACKFILL_BATCH = 8
+BACKFILL_GAP_S = 5.0
+BACKFILL_IDLE_S = 20.0
+
+
+def hour_floor_ms(now_ms: int) -> int:
+    dt = datetime.fromtimestamp(int(now_ms) / 1000, tz=SGT)
+    floored = dt.replace(minute=0, second=0, microsecond=0)
+    return int(floored.timestamp() * 1000)
+
+
+def next_hour_ms(now_ms: int) -> int:
+    dt = datetime.fromtimestamp(int(now_ms) / 1000, tz=SGT)
+    floored = dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return int(floored.timestamp() * 1000)
+
+
+def seconds_until_next_hour(now_ms: int) -> float:
+    return max(0.0, (next_hour_ms(now_ms) - int(now_ms)) / 1000.0)
+
+
+def slot_floor_ms(now_ms: int, step_ms: int = REFRESH_MS) -> int:
+    """Floor ``now_ms`` to a UTC+8 step, counting from local midnight."""
+    dt = datetime.fromtimestamp(int(now_ms) / 1000, tz=SGT)
+    midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = int(now_ms) - int(midnight.timestamp() * 1000)
+    if elapsed < 0:
+        elapsed = 0
+    step = int(step_ms)
+    return int(midnight.timestamp() * 1000) + elapsed - (elapsed % step)
+
+
+def next_slot_ms(now_ms: int, step_ms: int = REFRESH_MS) -> int:
+    """Next UTC+8 boundary strictly after ``now_ms``."""
+    return slot_floor_ms(now_ms, step_ms) + int(step_ms)
+
+
+def digest_key(items: list[dict]) -> str:
+    """Stable hash of the scored set. Same items must not pay for another digest."""
+    parts = []
+    for row in items or []:
+        parts.append("|".join((
+            str(row.get("content_hash") or ""),
+            str(row.get("title") or ""),
+            str(row.get("sentiment_label") or ""),
+            str(row.get("summary_zh") or ""),
+            str(row.get("direction") or ""),
+            str(row.get("urgency") or ""),
+        )))
+    parts.sort()
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+class HourlyPlan:
+    """Legacy hour grid. The news service uses :class:`FiveMinutePlan`."""
+
+    def __init__(self) -> None:
+        self.last_slot: int | None = None
+
+    def on_start(self, now_ms: int) -> bool:
+        self.last_slot = hour_floor_ms(now_ms)
+        return True
+
+    def on_tick(self, now_ms: int) -> bool:
+        slot = hour_floor_ms(now_ms)
+        if self.last_slot is None or slot > self.last_slot:
+            self.last_slot = slot
+            return True
+        return False
+
+    def seconds_until(self, now_ms: int) -> float:
+        return seconds_until_next_hour(now_ms)
+
+    def next_at(self, now_ms: int) -> int:
+        return next_hour_ms(now_ms)
+
+
+class FiveMinutePlan:
+    """Startup fetches once. Later ticks fire once per UTC+8 5-minute slot."""
+
+    def __init__(self) -> None:
+        self.last_slot: int | None = None
+
+    def on_start(self, now_ms: int) -> bool:
+        self.last_slot = slot_floor_ms(now_ms)
+        return True
+
+    def on_tick(self, now_ms: int) -> bool:
+        slot = slot_floor_ms(now_ms)
+        if self.last_slot is None or slot > self.last_slot:
+            self.last_slot = slot
+            return True
+        return False
+
+    def seconds_until(self, now_ms: int) -> float:
+        return max(0.0, (next_slot_ms(now_ms) - int(now_ms)) / 1000.0)
+
+    def next_at(self, now_ms: int) -> int:
+        return next_slot_ms(now_ms)
+
+
+def run_schedule(stop_event, now_ms_fn: Callable[[], int], plan,
+                 refresh_fn: Callable[[int], None], wait: Callable[[float], bool]) -> None:
+    """Fetch immediately, then once each time the plan's slot changes."""
+    now = int(now_ms_fn())
+    plan.on_start(now)
+    refresh_fn(now)
+    while not stop_event.is_set():
+        delay = float(plan.seconds_until(int(now_ms_fn()))) + 0.05
+        if wait(delay):
+            return
+        now = int(now_ms_fn())
+        if plan.on_tick(now):
+            refresh_fn(now)
+
+
+class NewsRefresher:
+    def __init__(self, db_path: Path, *, fetcher: Callable[[int], dict],
+                 scorer: Callable[[dict], dict], now_ms: Callable[[], int],
+                 digest_fn: Callable[[list[dict], int], dict | None] | None = None,
+                 cooldown_ms: int = COOLDOWN_MS) -> None:
+        self._db_path = Path(db_path)
+        self._fetcher = fetcher
+        self._scorer = scorer
+        self._now_ms = now_ms
+        self._digest_fn = digest_fn
+        self._cooldown_ms = int(cooldown_ms)
+        self._lock = threading.Lock()
+        self._refreshing = False
+        self._last_refresh_at: int | None = None
+        self._manual_at: int | None = None
+        self._items: list[dict] = []
+        self._sources: dict = {}
+        self._status = "empty"
+        self._score_counts: dict = {}
+        self._digest: dict | None = None
+        self._digest_key: str | None = None
+        self._plan = FiveMinutePlan()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def sources(self) -> dict:
+        return dict(self._sources)
+
+    @property
+    def digest(self) -> dict | None:
+        return dict(self._digest) if self._digest else None
+
+    @property
+    def last_refresh_at(self) -> int | None:
+        return self._last_refresh_at
+
+    def _cooldown_remaining(self, now_ms: int) -> int:
+        if self._manual_at is None:
+            return 0
+        left = self._cooldown_ms - (int(now_ms) - int(self._manual_at))
+        if left <= 0:
+            return 0
+        return int(math.ceil(left / 1000))
+
+    def _is_fresh(self, now_ms: int) -> bool:
+        if self._last_refresh_at is None:
+            return False
+        return int(now_ms) - int(self._last_refresh_at) <= STALE_MS
+
+    def _cached(self, now_ms: int) -> dict:
+        return {
+            "items": [dict(item) for item in self._items],
+            "sources": dict(self._sources),
+            "status": self._status,
+            "fetched_at": self._last_refresh_at or int(now_ms),
+            "scored": True,
+            "from_cache": True,
+            "score_counts": dict(self._score_counts),
+        }
+
+    def public_state(self, now_ms: int) -> dict:
+        nxt = self._plan.next_at(now_ms)
+        last = self._last_refresh_at
+        return {
+            "last_refresh_at": last,
+            "last_refresh_at_utc8": format_utc8(last) if last else None,
+            "next_refresh_at": nxt,
+            "next_refresh_at_utc8": format_utc8(nxt),
+            "refreshing": bool(self._refreshing),
+            "cooldown_remaining_s": self._cooldown_remaining(now_ms),
+            "sources": dict(self._sources),
+            "score_counts": dict(self._score_counts),
+            "digest": self.digest,
+        }
+
+    def _busy(self, now_ms: int) -> dict:
+        return {
+            "accepted": False,
+            "refreshing": True,
+            "cooling": False,
+            "cooldown_remaining_s": self._cooldown_remaining(now_ms),
+            "snapshot": self._cached(now_ms),
+        }
+
+    def _cooling(self, now_ms: int, remain: int) -> dict:
+        return {
+            "accepted": False,
+            "refreshing": False,
+            "cooling": True,
+            "cooldown_remaining_s": int(remain),
+            "snapshot": self._cached(now_ms),
+        }
+
+    def _run(self, now_ms: int) -> dict:
+        self._refreshing = True
+        try:
+            try:
+                snap = self._fetcher(int(now_ms)) or {}
+            except Exception as exc:
+                log.warning("news fetch failed error=%s", type(exc).__name__)
+                self._status = "error"
+                self._sources = {}
+                failed = {
+                    "items": [],
+                    "sources": {},
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                    "fetched_at": int(now_ms),
+                    "scored": True,
+                    "score_counts": {},
+                }
+                return {
+                    "accepted": True,
+                    "refreshing": False,
+                    "cooling": False,
+                    "cooldown_remaining_s": self._cooldown_remaining(now_ms),
+                    "snapshot": failed,
+                }
+            items = list(snap.get("items") or [])
+            snap["items"] = items
+            try:
+                live.persist(items, self._db_path, int(now_ms))
+            except Exception:
+                log.warning("news persist failed")
+            try:
+                scored = self._scorer(snap) or snap
+            except Exception:
+                log.warning("news score failed")
+                scored = snap
+            self._items = list(scored.get("items") or [])
+            self._sources = dict(scored.get("sources") or {})
+            self._status = scored.get("status") or ("ok" if self._items else "empty")
+            self._score_counts = dict(scored.get("score_counts") or {})
+            self._last_refresh_at = int(scored.get("fetched_at") or now_ms)
+            scored["scored"] = True
+            scored["fetched_at"] = self._last_refresh_at
+            scored["from_cache"] = False
+            main_items = [row for row in self._items if str(row.get("source") or "") != "gdelt" and in_main_feed(row)]
+            if self._digest_fn and main_items:
+                key = digest_key(main_items)
+                if key == self._digest_key and self._digest:
+                    log.info("news digest reused items=%s", len(main_items))
+                else:
+                    try:
+                        digest = self._digest_fn(main_items, int(now_ms))
+                        if digest:
+                            self._digest = digest
+                            self._digest_key = key
+                    except Exception:
+                        log.warning("news digest failed")
+            log.info("news refresh status=%s items=%s", self._status, len(self._items))
+            return {
+                "accepted": True,
+                "refreshing": False,
+                "cooling": False,
+                "cooldown_remaining_s": self._cooldown_remaining(now_ms),
+                "snapshot": scored,
+            }
+        finally:
+            self._refreshing = False
+
+    def refresh(self, now_ms: int, *, manual: bool) -> dict:
+        if manual:
+            if not self._lock.acquire(blocking=False):
+                return self._busy(now_ms)
+            try:
+                remain = self._cooldown_remaining(now_ms)
+                if remain:
+                    return self._cooling(now_ms, remain)
+                self._manual_at = int(now_ms)
+                return self._run(now_ms)
+            finally:
+                self._lock.release()
+        self._lock.acquire()
+        try:
+            return self._run(now_ms)
+        finally:
+            self._lock.release()
+
+    def for_predict(self, now_ms: int) -> dict:
+        """Use the cache when it is at most one hour old; otherwise fetch once."""
+        if self._is_fresh(now_ms):
+            return self._cached(now_ms)
+        self._lock.acquire()
+        try:
+            if self._is_fresh(now_ms):
+                return self._cached(now_ms)
+            result = self._run(now_ms)
+            return result.get("snapshot") or self._cached(now_ms)
+        finally:
+            self._lock.release()
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+
+        def _refresh(now: int) -> None:
+            self.refresh(now, manual=False)
+
+        self._thread = threading.Thread(
+            target=run_schedule,
+            args=(self._stop, self._now_ms, self._plan, _refresh, self._stop.wait),
+            name="supere-news-refresh",
+            daemon=True,
+        )
+        self._thread.start()
+        self._backfill_thread = threading.Thread(
+            target=self._backfill_loop,
+            name="supere-news-backfill",
+            daemon=True,
+        )
+        self._backfill_thread.start()
+
+    def backfill_once(self) -> int:
+        """Score one batch of panel rows still on the rule fallback. Returns how many were sent.
+
+        Skips GDELT and anything already scored by the model. Does not run while a
+        refresh is in flight, and the model client itself allows only one request.
+        """
+        if self._refreshing or not secrets.llm_configured():
+            return 0
+        now = int(self._now_ms())
+        pending = pending_llm_items(
+            self._db_path, tuple(sorted(live.PANEL_SOURCES)), now - 24 * 3_600_000,
+            limit=BACKFILL_BATCH,
+        )
+        if not pending:
+            return 0
+        snap = {"items": pending, "sources": dict(self._sources), "status": "ok", "fetched_at": now}
+        try:
+            self._scorer(snap)
+        except Exception:
+            log.warning("news backfill failed")
+            return 0
+        log.info("news backfill scored=%s", len(pending))
+        return len(pending)
+
+    def _backfill_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                count = self.backfill_once()
+            except Exception:
+                log.warning("news backfill failed")
+                count = 0
+            self._stop.wait(BACKFILL_GAP_S if count else BACKFILL_IDLE_S)
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        backfill = getattr(self, "_backfill_thread", None)
+        if backfill is not None and backfill.is_alive():
+            backfill.join(timeout=2.0)
