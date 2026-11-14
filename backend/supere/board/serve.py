@@ -20,7 +20,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from supere.board.engine import analyze
 from supere.board.fetcher import BoardFetcher
+from supere.board.risk import load_calendar
 from supere.board.settings import AnalysisConfig, load_analysis
 from supere.config import apply_no_proxy, load_config, proxy_or_none
 
@@ -84,6 +86,12 @@ def create_app(
     @app.get("/api/board/data")
     def board_data():
         return fetcher.view()
+
+    @app.get("/api/board")
+    def board():
+        snap = fetcher.view()
+        snap["calendar"] = load_calendar(root / "board" / "calendar.csv")
+        return analyze(snap, analysis)
 
     @app.get("/api/board/config")
     def board_config():
