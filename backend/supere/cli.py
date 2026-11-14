@@ -30,6 +30,9 @@ def main(argv: list[str] | None = None) -> None:
     prev.add_argument("--days", type=int, default=10, help="合成 K 线的天数，从 2026-10-26 起")
     detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
     detach.add_argument("role", choices=("ingestor", "api"))
+    news_cmd = sub.add_parser("news", help="消息面服务，127.0.0.1:8769，不加载预测模型")
+    news_cmd.add_argument("--port", type=int, default=8769)
+    news_cmd.add_argument("--data-dir", help="数据目录，默认用配置里的目录")
     sub.add_parser("backup", help="立刻做一次 SQLite 在线备份和 Parquet 增量复制")
     sub.add_parser("restore-drill", help="把最近一份备份复制出来做完整性检查，不替换正在用的库")
 
@@ -73,6 +76,12 @@ def main(argv: list[str] | None = None) -> None:
             port=args.port,
             days=args.days,
         )
+    elif args.cmd == "news":
+        from supere.config import data_dir
+        from supere.news.serve import main as news_main
+
+        root = Path(args.data_dir).resolve() if args.data_dir else data_dir(cfg, path)
+        raise SystemExit(news_main(["--data-dir", str(root), "--port", str(args.port)]))
     elif args.cmd == "backup":
         _backup(cfg, path)
     elif args.cmd == "restore-drill":

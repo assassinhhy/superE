@@ -550,3 +550,98 @@ def test_backfill_scores_rule_rows_and_skips_gdelt(tmp_path: Path, monkeypatch):
     assert seen == ["Ethereum client release"]
     refresher._refreshing = True
     assert refresher.backfill_once() == 0
+
+
+def test_five_minute_plan_fires_on_the_slot():
+    from supere.news.refresh import FiveMinutePlan, next_slot_ms, slot_floor_ms
+
+    plan = FiveMinutePlan()
+    assert plan.on_start(_ms(10, 7)) is True
+    assert slot_floor_ms(_ms(10, 7)) == _ms(10, 5)
+    assert next_slot_ms(_ms(10, 7)) == _ms(10, 10)
+    assert plan.on_tick(_ms(10, 9)) is False
+    assert plan.on_tick(_ms(10, 10)) is True
+    assert plan.on_tick(_ms(10, 12)) is False
+    assert plan.next_at(_ms(10, 0)) == _ms(10, 5)
+    assert 0 < plan.seconds_until(_ms(10, 7, 30)) <= 300
+
+
+def test_digest_is_reused_until_the_scored_set_changes(tmp_path: Path):
+    from supere.news.refresh import NewsRefresher
+
+    calls = {"n": 0}
+    box = {"title": "Ethereum development update number 1"}
+
+    def fetcher(now):
+        return {
+            "items": [_item(
+                1,
+                title=box["title"],
+                content_hash=box["title"],
+                relevance=0.9,
+                summary_zh="以太坊有新的进展。",
+                sentiment_label="利多",
+                direction=0.4,
+                urgency=0.3,
+            )],
+            "sources": {"coindesk": {"ok": True, "count": 1, "error": None}},
+            "status": "ok",
+            "fetched_at": now,
+        }
+
+    def digest(_items, _now):
+        calls["n"] += 1
+        return {"prose_1h": "最近 1 小时偏多。", "prose_24h": "最近 24 小时偏多。"}
+
+    def scorer(snap):
+        db = Database(tmp_path / "superE.sqlite")
+        try:
+            for item in snap.get("items") or []:
+                if item.get("id") is None:
+                    continue
+                db.conn.execute(
+                    "UPDATE news SET summary_zh=?, sentiment_label=? WHERE id=?",
+                    (item.get("summary_zh") or "", item.get("sentiment_label") or "", int(item["id"])),
+                )
+            db.conn.commit()
+        finally:
+            db.close()
+        return snap
+
+    refresher = NewsRefresher(
+        tmp_path / "superE.sqlite",
+        fetcher=fetcher,
+        scorer=scorer,
+        now_ms=lambda: NOW,
+        digest_fn=digest,
+    )
+    refresher.refresh(NOW, manual=False)
+    refresher.refresh(NOW + 60_000, manual=False)
+    assert calls["n"] == 1
+    box["title"] = "Ethereum ETF sees a fresh inflow"
+    refresher.refresh(NOW + 120_000, manual=False)
+    assert calls["n"] == 2
+
+
+def test_news_process_does_not_serve_predictions(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from supere.news import serve as news_serve
+
+    source = Path(news_serve.__file__).read_text(encoding="utf-8")
+    assert "PredictService" not in source
+    assert "train.predict" not in source
+    app = news_serve.create_app(
+        tmp_path,
+        news_snapshot=lambda now: {"items": [], "sources": {}, "status": "empty", "fetched_at": now},
+        clock=lambda: NOW / 1000,
+    )
+    client = TestClient(app)
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json()["role"] == "news"
+    assert client.get("/api/predict").status_code == 404
+    listed = client.get("/api/news")
+    assert listed.status_code == 200
+    gap = listed.json()["next_refresh_at"] - NOW
+    assert 0 < gap <= 5 * 60 * 1000

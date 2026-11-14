@@ -14,18 +14,16 @@ function files(dir) {
   });
 }
 
-test("SidePanel polls cached news and predicts only from the click handler", () => {
+test("the desk shows signals and news, and no prediction control", () => {
   const panel = readFileSync(join(SRC, "components", "SidePanel.vue"), "utf8");
-  assert.ok(!/setTimeout/.test(panel));
-  assert.ok(!/WebSocket/.test(panel));
-  assert.match(panel, /setInterval\(\(\) => controller\.loadCachedNews\(\), NEWS_POLL_MS\)/);
-  assert.ok(!/setInterval\([\s\S]{0,120}predict/.test(panel));
-  const mounted = panel.match(/onMounted\(\(\) => \{([\s\S]*?)\}\);/);
-  assert.ok(mounted, "onMounted block present");
-  assert.match(mounted[1], /loadCachedNews/);
-  assert.ok(!/runPredict|predictOnClick|api\.predict/.test(mounted[1]));
-  assert.match(panel, /@click="runPredict"/);
-  assert.match(panel, /@click="refreshNews"/);
+  const app = readFileSync(join(SRC, "App.vue"), "utf8");
+  const news = readFileSync(join(SRC, "components", "NewsView.vue"), "utf8");
+  const visible = panel + app + news;
+  assert.match(panel, /信号通知/);
+  assert.match(news, /setInterval\(load, NEWS_POLL_MS\)/);
+  assert.match(news, /@click="refresh"/);
+  assert.ok(!/runPredict|predictOnClick|模型原值|加消息面后/.test(visible));
+  assert.ok(!/买卖盘|盘口价/.test(panel));
 });
 
 test("the controller never calls prediction from its news path", () => {

@@ -139,19 +139,20 @@ test("redraw throttle waits out the remainder of 250ms", () => {
   assert.equal(paintDelay(1100, 800), 0);
 });
 
-test("MA15 and MA25 are separate overlays, and the old periods are gone", () => {
-  assert.deepEqual(MA_LINES.map((line) => line.period), [15, 25]);
-  const ma15 = maCreate(MA_LINES[0]);
-  const ma25 = maCreate(MA_LINES[1]);
-  assert.deepEqual(ma15.calcParams, [15]);
-  assert.deepEqual(ma25.calcParams, [25]);
-  assert.notEqual(ma15.id, ma25.id);
-  let on = new Set(["MA15", "MA25"]);
-  on = toggleMember(on, "MA15");
-  assert.equal(on.has("MA15"), false);
-  assert.equal(on.has("MA25"), true);
-  on = toggleMember(on, "MA25");
-  assert.equal(on.has("MA15") || on.has("MA25"), false);
+test("MA20 and MA50 are separate overlays", () => {
+  assert.deepEqual(MA_LINES.map((line) => line.period), [20, 50]);
+  assert.equal(MA_LINES.some((line) => line.period === 15 || line.period === 25), false);
+  const ma20 = maCreate(MA_LINES[0]);
+  const ma50 = maCreate(MA_LINES[1]);
+  assert.deepEqual(ma20.calcParams, [20]);
+  assert.deepEqual(ma50.calcParams, [50]);
+  assert.notEqual(ma20.id, ma50.id);
+  let on = new Set(["MA20", "MA50"]);
+  on = toggleMember(on, "MA20");
+  assert.equal(on.has("MA20"), false);
+  assert.equal(on.has("MA50"), true);
+  on = toggleMember(on, "MA50");
+  assert.equal(on.has("MA20") || on.has("MA50"), false);
 });
 
 test("metrics paging stops when the server ignores end and repeats the latest page", () => {

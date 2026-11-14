@@ -1,12 +1,18 @@
-"""Hourly news refresh, manual refresh, and the one-hour prediction cache.
+"""News refresh every five minutes, plus a manual refresh with a cooldown.
 
 The schedule follows Asia/Singapore (UTC+8, no daylight saving). A refresh
-runs once when the service starts, then at each hour boundary. Manual refresh
-waits 60 seconds between accepted calls and never overlaps another refresh.
+runs once when the service starts, then at each 5-minute boundary. Manual
+refresh waits 60 seconds between accepted calls and never overlaps another
+refresh. A one-hour cache remains only for the unused prediction click path.
+
+Items that already have a model score are not sent again: the scorer looks
+them up by content hash. The optional prose digest is also skipped when the
+same scored set comes back.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import threading
@@ -30,6 +36,7 @@ except Exception:  # pragma: no cover - tzdata is present on the runtime image
 
 STALE_MS = 3_600_000
 COOLDOWN_MS = 60_000
+REFRESH_MS = 5 * 60 * 1000
 # One batch at a time, then a pause, so backfill does not share the model quota in a burst.
 BACKFILL_BATCH = 8
 BACKFILL_GAP_S = 5.0
@@ -52,8 +59,40 @@ def seconds_until_next_hour(now_ms: int) -> float:
     return max(0.0, (next_hour_ms(now_ms) - int(now_ms)) / 1000.0)
 
 
+def slot_floor_ms(now_ms: int, step_ms: int = REFRESH_MS) -> int:
+    """Floor ``now_ms`` to a UTC+8 step, counting from local midnight."""
+    dt = datetime.fromtimestamp(int(now_ms) / 1000, tz=SGT)
+    midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = int(now_ms) - int(midnight.timestamp() * 1000)
+    if elapsed < 0:
+        elapsed = 0
+    step = int(step_ms)
+    return int(midnight.timestamp() * 1000) + elapsed - (elapsed % step)
+
+
+def next_slot_ms(now_ms: int, step_ms: int = REFRESH_MS) -> int:
+    """Next UTC+8 boundary strictly after ``now_ms``."""
+    return slot_floor_ms(now_ms, step_ms) + int(step_ms)
+
+
+def digest_key(items: list[dict]) -> str:
+    """Stable hash of the scored set. Same items must not pay for another digest."""
+    parts = []
+    for row in items or []:
+        parts.append("|".join((
+            str(row.get("content_hash") or ""),
+            str(row.get("title") or ""),
+            str(row.get("sentiment_label") or ""),
+            str(row.get("summary_zh") or ""),
+            str(row.get("direction") or ""),
+            str(row.get("urgency") or ""),
+        )))
+    parts.sort()
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
 class HourlyPlan:
-    """Decides when a refresh is due. Startup always fetches; later ticks fire once per hour."""
+    """Legacy hour grid. The news service uses :class:`FiveMinutePlan`."""
 
     def __init__(self) -> None:
         self.last_slot: int | None = None
@@ -69,15 +108,45 @@ class HourlyPlan:
             return True
         return False
 
+    def seconds_until(self, now_ms: int) -> float:
+        return seconds_until_next_hour(now_ms)
 
-def run_schedule(stop_event, now_ms_fn: Callable[[], int], plan: HourlyPlan,
+    def next_at(self, now_ms: int) -> int:
+        return next_hour_ms(now_ms)
+
+
+class FiveMinutePlan:
+    """Startup fetches once. Later ticks fire once per UTC+8 5-minute slot."""
+
+    def __init__(self) -> None:
+        self.last_slot: int | None = None
+
+    def on_start(self, now_ms: int) -> bool:
+        self.last_slot = slot_floor_ms(now_ms)
+        return True
+
+    def on_tick(self, now_ms: int) -> bool:
+        slot = slot_floor_ms(now_ms)
+        if self.last_slot is None or slot > self.last_slot:
+            self.last_slot = slot
+            return True
+        return False
+
+    def seconds_until(self, now_ms: int) -> float:
+        return max(0.0, (next_slot_ms(now_ms) - int(now_ms)) / 1000.0)
+
+    def next_at(self, now_ms: int) -> int:
+        return next_slot_ms(now_ms)
+
+
+def run_schedule(stop_event, now_ms_fn: Callable[[], int], plan,
                  refresh_fn: Callable[[int], None], wait: Callable[[float], bool]) -> None:
-    """Fetch immediately, then once each time the Singapore hour changes."""
+    """Fetch immediately, then once each time the plan's slot changes."""
     now = int(now_ms_fn())
     plan.on_start(now)
     refresh_fn(now)
     while not stop_event.is_set():
-        delay = seconds_until_next_hour(int(now_ms_fn())) + 0.05
+        delay = float(plan.seconds_until(int(now_ms_fn()))) + 0.05
         if wait(delay):
             return
         now = int(now_ms_fn())
@@ -105,7 +174,8 @@ class NewsRefresher:
         self._status = "empty"
         self._score_counts: dict = {}
         self._digest: dict | None = None
-        self._plan = HourlyPlan()
+        self._digest_key: str | None = None
+        self._plan = FiveMinutePlan()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -146,7 +216,7 @@ class NewsRefresher:
         }
 
     def public_state(self, now_ms: int) -> dict:
-        nxt = next_hour_ms(now_ms)
+        nxt = self._plan.next_at(now_ms)
         last = self._last_refresh_at
         return {
             "last_refresh_at": last,
@@ -224,12 +294,17 @@ class NewsRefresher:
             scored["from_cache"] = False
             main_items = [row for row in self._items if str(row.get("source") or "") != "gdelt" and in_main_feed(row)]
             if self._digest_fn and main_items:
-                try:
-                    digest = self._digest_fn(main_items, int(now_ms))
-                    if digest:
-                        self._digest = digest
-                except Exception:
-                    log.warning("news digest failed")
+                key = digest_key(main_items)
+                if key == self._digest_key and self._digest:
+                    log.info("news digest reused items=%s", len(main_items))
+                else:
+                    try:
+                        digest = self._digest_fn(main_items, int(now_ms))
+                        if digest:
+                            self._digest = digest
+                            self._digest_key = key
+                    except Exception:
+                        log.warning("news digest failed")
             log.info("news refresh status=%s items=%s", self._status, len(self._items))
             return {
                 "accepted": True,

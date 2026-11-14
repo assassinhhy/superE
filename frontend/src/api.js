@@ -33,6 +33,14 @@ export async function loadOlderSeries(fetchPage, timeKey, until, maxPages = 8) {
   return rows;
 }
 
+// News is its own process. The page on 8766 calls it directly so 8766 stays up.
+export const NEWS_ORIGIN = "http://127.0.0.1:8769";
+
+function newsURL(path, params) {
+  const q = params ? `?${query(params)}` : "";
+  return `${NEWS_ORIGIN}${path}${q}`;
+}
+
 export const api = {
   health: () => getJSON("/api/health"),
   status: () => getJSON("/api/status"),
@@ -48,8 +56,8 @@ export const api = {
   // Forecasts are only fetched by the explicit 预测 button.
   predictOnClick: () => getJSON("/api/predict", { method: "POST" }),
   // Cached news. GET never fetches and never runs a prediction.
-  news: (params) => getJSON(`/api/news?${query(params || {})}`),
-  refreshNews: () => getJSON("/api/news/refresh", { method: "POST" }),
+  news: (params) => getJSON(newsURL("/api/news", params || {})),
+  refreshNews: () => getJSON(newsURL("/api/news/refresh"), { method: "POST" }),
   aggregate: (interval, bars) =>
     getJSON(`/api/checks/aggregate?${query({ interval, bars })}`),
 };

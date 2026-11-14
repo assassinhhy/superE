@@ -33,7 +33,7 @@ const SOURCE_CN = {
 };
 
 export const NEWS_FILTERS = ["全部", "利多", "利空", "中性", "只看重要"];
-export const NEWS_POLL_MS = 5 * 60 * 1000;
+export const NEWS_POLL_MS = 30 * 1000;
 export const NEWS_PAGE = 15;
 export const NEWS_FOLD_MS = 6 * 60 * 60 * 1000;
 
@@ -109,12 +109,37 @@ export function formatNewsRows(items, nowMs = Date.now()) {
   return (items || []).map((item) => formatNewsRow(item, nowMs));
 }
 
-export function filterNews(rows, mode) {
+export function filterNews(rows, mode, source = "全部") {
+  let out = rows || [];
   if (mode === "利多" || mode === "利空" || mode === "中性") {
-    return (rows || []).filter((row) => row.directionLabel === mode);
+    out = out.filter((row) => row.directionLabel === mode);
+  } else if (mode === "只看重要") {
+    out = out.filter((row) => row.important);
+  } else {
+    out = out.slice();
   }
-  if (mode === "只看重要") return (rows || []).filter((row) => row.important);
-  return (rows || []).slice();
+  if (source && source !== "全部") out = out.filter((row) => row.source === source);
+  return out;
+}
+
+export function overviewSentence(summary) {
+  if (!summary) return "近 1 小时和近 24 小时都还没有足够的消息。";
+  const piece = (bias, counts) => {
+    const row = counts || {};
+    return `${bias || "中性"}，利多 ${row.positive || 0} 条、利空 ${row.negative || 0} 条、中性 ${row.neutral || 0} 条`;
+  };
+  return `近 1 小时${piece(summary.bias_1h, summary.counts_1h)}；近 24 小时${piece(summary.bias_24h, summary.counts_24h)}。`;
+}
+
+export function isAlertNews(row) {
+  return Boolean(row?.urgent) && (row.directionLabel === "利多" || row.directionLabel === "利空");
+}
+
+export function urgentBrief(rows) {
+  const hot = (rows || []).filter(isAlertNews).slice(0, 3);
+  if (!hot.length) return "";
+  const text = hot.map((row) => String(row.impact || row.summary || "").trim()).filter(Boolean).join("");
+  return text || `${hot.length} 条高紧急消息。`;
 }
 
 export function importantRows(rows, limit = 5) {

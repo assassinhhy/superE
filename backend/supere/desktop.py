@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -28,6 +29,48 @@ def wait_for_api(origin: str, timeout: float = 45) -> bool:
     return False
 
 
+def _plain(text: str, limit: int = 140) -> str:
+    cleaned = "".join(ch for ch in str(text) if ch.isprintable() and ch not in "\r\n\t")
+    return cleaned[:limit]
+
+
+class WindowApi:
+    """JS bridge. ``window.pywebview.api.notify(title, body)`` shows a Windows balloon.
+
+    WebView2 does not reliably deliver the browser Notification API, so the
+    desktop process asks the system shell instead. The call is a no-op off Windows.
+    Titles and bodies are clipped and never written to the log.
+    """
+
+    def notify(self, title: str, body: str) -> dict:
+        if sys.platform != "win32":
+            return {"ok": False, "reason": "not_windows"}
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms\n"
+            "Add-Type -AssemblyName System.Drawing\n"
+            "$n = New-Object System.Windows.Forms.NotifyIcon\n"
+            "$n.Icon = [System.Drawing.SystemIcons]::Information\n"
+            "$n.Visible = $true\n"
+            "$n.BalloonTipTitle = $env:SUPERE_NOTIFY_TITLE\n"
+            "$n.BalloonTipText = $env:SUPERE_NOTIFY_BODY\n"
+            "$n.ShowBalloonTip(6000)\n"
+            "Start-Sleep -Seconds 6\n"
+            "$n.Dispose()\n"
+        )
+        env = os.environ.copy()
+        env["SUPERE_NOTIFY_TITLE"] = _plain(title)
+        env["SUPERE_NOTIFY_BODY"] = _plain(body, 180)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            env=env,
+            creationflags=flags,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"ok": True}
+
+
 def run_window(url: str) -> None:
     import webview
 
@@ -38,6 +81,7 @@ def run_window(url: str) -> None:
         height=900,
         min_size=(1100, 720),
         text_select=True,
+        js_api=WindowApi(),
     )
     webview.start()
 

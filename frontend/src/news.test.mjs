@@ -8,8 +8,10 @@ import {
   filterNews,
   formatAlert,
   formatNewsRows,
+  isAlertNews,
   isUrgent,
   layoutNews,
+  overviewSentence,
   refreshButtonState,
   refreshCountdown,
   relativeTime,
@@ -17,6 +19,7 @@ import {
   summaryHeadline,
   summaryLine,
   urgencyLabel,
+  urgentBrief,
 } from "./news.js";
 
 test("source names are shown in Chinese where known", () => {
@@ -104,7 +107,27 @@ test("countdown and relative time use Chinese units", () => {
   assert.equal(refreshCountdown(now - 1000, now), "即将刷新");
   assert.equal(refreshCountdown(now + 90 * 60 * 1000, now), "1 小时 30 分");
   assert.equal(relativeTime(now - 23 * 60 * 1000, now), "23 分钟前");
-  assert.equal(NEWS_POLL_MS, 300000);
+  assert.equal(NEWS_POLL_MS, 30000);
+});
+
+test("overview names both windows and urgent news stays directional", () => {
+  assert.equal(
+    overviewSentence({
+      bias_1h: "偏多",
+      bias_24h: "偏空",
+      counts_1h: { positive: 2, negative: 0, neutral: 1 },
+      counts_24h: { positive: 3, negative: 5, neutral: 4 },
+    }),
+    "近 1 小时偏多，利多 2 条、利空 0 条、中性 1 条；近 24 小时偏空，利多 3 条、利空 5 条、中性 4 条。",
+  );
+  const rows = formatNewsRows([
+    { title: "a", summary_zh: "资金流入。", impact_zh: "买盘可能增加。", sentiment_label: "利多", urgency: 0.8, importance: 3 },
+    { title: "b", summary_zh: "中性观察。", sentiment_label: "中性", urgency: 0.9, importance: 3 },
+  ]);
+  assert.equal(isAlertNews(rows[0]), true);
+  assert.equal(isAlertNews(rows[1]), false);
+  assert.equal(urgentBrief(rows), "买盘可能增加。");
+  assert.deepEqual(filterNews(rows, "全部", "Google 新闻"), []);
 });
 
 test("refresh button shows spinning or remaining seconds", () => {

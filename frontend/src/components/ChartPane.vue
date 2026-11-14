@@ -1,7 +1,13 @@
 <script setup>
 import { dispose, init, registerIndicator } from "klinecharts";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { api, loadOlderSeries } from "../api.js";
+import { api } from "../api.js";
+import {
+  DRAW_TOOLS,
+  drawingKey,
+  loadBook,
+  saveBook,
+} from "../drawings.js";
 import { state } from "../live.js";
 import {
   AXIS_PX,
@@ -9,14 +15,11 @@ import {
   MAIN_PANE_PX,
   MA_LINES,
   PRIMARY_SUB,
-  SERIES_PAGE,
   SUB_PANE_PX,
   atr,
   chartBodyHeight,
-  joinBarExtras,
   maCreate,
   mainPaneFit,
-  metricPagesFor,
   paintDelay,
   toBar,
   toggleMember,
@@ -27,10 +30,12 @@ const props = defineProps({
   interval: { type: String, required: true },
 });
 
+const STORE = "supere.drawings.v1";
 const scrollEl = ref(null);
 const host = ref(null);
 const message = ref("");
-const enabled = ref(new Set(["BOLL", "MACD", "RSI", "ATR", "OI", "FUNDING", "LSR", "TAKER"]));
+const selectedId = ref("");
+const enabled = ref(new Set(["MA20", "MA50", "BOLL", "MACD", "RSI", "ATR"]));
 let chart = null;
 let mainHeight = 0;
 let pushBar = null;
@@ -39,67 +44,49 @@ let timer = null;
 let lastPaint = 0;
 let seenClosed = new Set();
 let resizeObserver = null;
+let bookKey = "";
+let restoring = false;
 
 const MAIN = [
   ...MA_LINES.map((line) => ({ id: line.id, label: line.id, ma: line })),
   { id: "BOLL", label: "BOLL" },
 ];
 const SUB = [
-  { id: PRIMARY_SUB, label: "MACD" },
   { id: "RSI", label: "RSI" },
+  { id: PRIMARY_SUB, label: "MACD" },
   { id: "ATR", label: "ATR" },
-  { id: "OI", label: "OI" },
-  { id: "FUNDING", label: "资金费率" },
-  { id: "LSR", label: "多空比" },
-  { id: "TAKER", label: "主动买卖比" },
-];
-const TOOLS = [
-  { id: "segment", label: "线段" },
-  { id: "rayLine", label: "射线" },
-  { id: "horizontalStraightLine", label: "水平线" },
-  { id: "fibonacciLine", label: "斐波那契" },
-  { id: "simpleAnnotation", label: "标注" },
 ];
 
-const NAMES = {
-  ATR: "SUPERE_ATR",
-  OI: "SUPERE_OI",
-  FUNDING: "SUPERE_FUNDING",
-  LSR: "SUPERE_LSR",
-  TAKER: "SUPERE_TAKER",
-};
+function readStore() {
+  try {
+    return JSON.parse(localStorage.getItem(STORE) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function writeStore(value) {
+  localStorage.setItem(STORE, JSON.stringify(value));
+}
+
+const NAMES = { ATR: "SUPERE_ATR" };
 
 let registered = false;
 function registerCustom() {
   if (registered) return;
   registered = true;
-  const line = (name, shortName, key, title, series, precision, calc) => {
-    registerIndicator({
-      name,
-      shortName,
-      series,
-      precision,
-      calcParams: name === "SUPERE_ATR" ? [14] : [],
-      figures: [{ key, title, type: name === "SUPERE_LIQ" ? "bar" : "line" }],
-      calc,
-    });
-  };
-  line("SUPERE_ATR", "ATR", "atr", "ATR: ", "normal", 2, (data, indicator) => {
-    const period = Number(indicator.calcParams?.[0] || 14);
-    return atr(data, period).map((value) => ({ atr: value }));
+  registerIndicator({
+    name: "SUPERE_ATR",
+    shortName: "ATR",
+    series: "normal",
+    precision: 2,
+    calcParams: [14],
+    figures: [{ key: "atr", title: "ATR: ", type: "line" }],
+    calc: (data, indicator) => {
+      const period = Number(indicator.calcParams?.[0] || 14);
+      return atr(data, period).map((value) => ({ atr: value }));
+    },
   });
-  line("SUPERE_OI", "OI", "oi", "OI: ", "normal", 0, (data) => data.map((bar) => ({ oi: bar.oi ?? null })));
-  line("SUPERE_FUNDING", "资金费率", "funding", "费率: ", "normal", 6, (data) =>
-    data.map((bar) => ({ funding: bar.funding ?? null })),
-  );
-  line("SUPERE_LSR", "多空比", "lsr", "多空比: ", "normal", 3, (data) =>
-    data.map((bar) => ({ lsr: bar.lsr ?? null })),
-  );
-  line("SUPERE_TAKER", "主动买占比", "taker", "主动买: ", "normal", 3, (data) =>
-    data.map((bar) => ({
-      taker: bar.volume ? bar.takerBuy / bar.volume : null,
-    })),
-  );
 }
 
 function indicatorName(id) {
@@ -108,48 +95,6 @@ function indicatorName(id) {
 
 function periodOf(id) {
   return INTERVALS.find((item) => item.id === id) || INTERVALS[3];
-}
-
-async function decorate(rawBars) {
-  const bars = rawBars.map(toBar).filter((bar) => Number.isFinite(bar.timestamp));
-  if (!bars.length) return [];
-  const start = bars[0].timestamp - 86_400_000;
-  const end = bars[bars.length - 1].closeTime;
-  const liqStart = Math.max(start, end - 14 * 86_400_000);
-  // 指标窗口必须锚定在这一批 K 线的末尾，不能从"最新一页"开始往回翻。
-  const [metricRows, fundingRows, spot, premium, liq] = await Promise.all([
-    loadOlderSeries(
-      (cursor) =>
-        api
-          .metrics({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor ?? end })
-          .then((body) => body.rows || []),
-      "ts",
-      start,
-      metricPagesFor(end - start),
-    ).catch(() => []),
-    loadOlderSeries(
-      (cursor) =>
-        api
-          .funding({ symbol: "ETHUSDT", limit: SERIES_PAGE, end: cursor ?? end })
-          .then((body) => body.settled || []),
-      "funding_time",
-      start,
-    ).catch(() => []),
-    props.market === "um"
-      ? api.klines({ market: "spot", symbol: "ETHUSDT", interval: "1m", start, end, limit: 1500 }).catch(() => ({ bars: [] }))
-      : Promise.resolve({ bars: [] }),
-    api
-      .klines({ market: "um_premium", symbol: "ETHUSDT", interval: props.interval, start, end, limit: 1500 })
-      .catch(() => ({ bars: [] })),
-    api.liquidations({ symbol: "ETHUSDT", start: liqStart, end }).catch(() => ({ rows: [] })),
-  ]);
-  return joinBarExtras(bars, {
-    metrics: metricRows,
-    funding: fundingRows,
-    spot: spot.bars,
-    premium: premium.bars,
-    liquidations: liq.rows,
-  });
 }
 
 function schedule(bar) {
@@ -164,22 +109,6 @@ function schedule(bar) {
     if (!pushBar) return;
     for (const item of batch) pushBar(item);
   }, delay);
-}
-
-function carry(raw) {
-  const bar = toBar(raw);
-  const list = chart?.getDataList?.() || [];
-  const prev = list.length ? list[list.length - 1] : null;
-  const same = prev && prev.timestamp === bar.timestamp ? prev : null;
-  return {
-    ...bar,
-    oi: same?.oi ?? null,
-    lsr: same?.lsr ?? null,
-    funding: same?.funding ?? null,
-    basis: same?.basis ?? null,
-    premium: same?.premium ?? null,
-    liq: same?.liq ?? null,
-  };
 }
 
 function loader() {
@@ -199,7 +128,7 @@ function loader() {
         if (type === "forward" && timestamp) params.end = timestamp - 1;
         if (type === "init") params.include_forming = true;
         const body = await api.klines(params);
-        const rows = await decorate(body.bars || []);
+        const rows = (body.bars || []).map(toBar).filter((bar) => Number.isFinite(bar.timestamp));
         message.value = rows.length ? "" : "这个周期本地还没有 K 线";
         callback(rows, { forward: rows.length >= 500, backward: false });
       } catch {
@@ -226,12 +155,15 @@ function showIndicator(id) {
     chart.createIndicator(maCreate(item.ma), true);
     return;
   }
-  const name = indicatorName(id);
   if (item) {
-    chart.createIndicator({ name, paneId: "candle_pane" }, true);
+    chart.createIndicator({ name: indicatorName(id), paneId: "candle_pane" }, true);
     return;
   }
-  chart.createIndicator(name);
+  if (id === "RSI") {
+    chart.createIndicator({ name: "RSI", calcParams: [14] });
+    return;
+  }
+  chart.createIndicator(indicatorName(id));
 }
 
 function hideIndicator(id) {
@@ -244,18 +176,22 @@ function hideIndicator(id) {
 }
 
 function mountIndicators() {
-  for (const id of enabled.value) showIndicator(id);
+  for (const item of MAIN) {
+    if (enabled.value.has(item.id)) showIndicator(item.id);
+  }
+  for (const item of SUB) {
+    if (enabled.value.has(item.id)) showIndicator(item.id);
+  }
 }
 
 function subCount() {
-  return [...enabled.value].filter((id) => SUB.some((item) => item.id === id)).length;
+  return SUB.filter((item) => enabled.value.has(item.id)).length;
 }
 
 function reflow() {
   if (!chart || !host.value || !scrollEl.value) return;
   const sep = Number(chart.getStyles()?.separator?.size) || 1;
   const viewport = scrollEl.value.clientHeight || 0;
-  // Candle + MACD fill the first screen; the other subs start below the fold.
   const main = mainPaneFit(viewport, { hasPrimarySub: enabled.value.has(PRIMARY_SUB), separator: sep, axis: AXIS_PX });
   if (main !== mainHeight) {
     mainHeight = main;
@@ -268,13 +204,12 @@ function reflow() {
   chart.resize();
 }
 
-/** Remove the subs that were on, then re-add the enabled ones in SUB order, so MACD is the first sub pane. */
 function restackSubs(before) {
   for (const item of SUB) {
     if (before.has(item.id)) chart.removeIndicator({ name: indicatorName(item.id) });
   }
   for (const item of SUB) {
-    if (enabled.value.has(item.id)) chart.createIndicator(indicatorName(item.id));
+    if (enabled.value.has(item.id)) showIndicator(item.id);
   }
 }
 
@@ -282,18 +217,80 @@ function toggle(id) {
   const before = enabled.value;
   const next = toggleMember(before, id);
   enabled.value = next;
-  if (id === PRIMARY_SUB && next.has(id)) restackSubs(before);
+  if (SUB.some((item) => item.id === id) && next.has(id)) restackSubs(before);
   else if (next.has(id)) showIndicator(id);
   else hideIndicator(id);
   reflow();
 }
 
+function overlayHooks() {
+  return {
+    onDrawEnd: () => persistSoon(),
+    onPressedMoveEnd: () => persistSoon(),
+    onRemoved: () => persistSoon(),
+    onSelected: (event) => {
+      selectedId.value = event?.overlay?.id || "";
+    },
+    onDeselected: (event) => {
+      if (selectedId.value === event?.overlay?.id) selectedId.value = "";
+    },
+  };
+}
+
+function persist() {
+  if (!chart || !bookKey || restoring) return;
+  writeStore(saveBook(readStore(), bookKey, chart.getOverlays?.() || []));
+}
+
+function persistSoon() {
+  if (restoring) return;
+  setTimeout(persist, 0);
+}
+
+function applyBook(key) {
+  if (!chart) return;
+  restoring = true;
+  bookKey = key;
+  chart.removeOverlay({});
+  for (const row of loadBook(readStore(), key)) {
+    chart.createOverlay({
+      name: row.name,
+      id: row.id || undefined,
+      points: row.points,
+      ...overlayHooks(),
+    });
+  }
+  restoring = false;
+  selectedId.value = "";
+}
+
 function draw(name) {
-  chart?.createOverlay(name);
+  chart?.createOverlay({ name, ...overlayHooks() });
+}
+
+function deleteSelected() {
+  if (!chart || !selectedId.value) return;
+  chart.removeOverlay({ id: selectedId.value });
+  selectedId.value = "";
+  persistSoon();
 }
 
 function clearDrawings() {
-  chart?.removeOverlay({});
+  if (!chart) return;
+  restoring = true;
+  chart.removeOverlay({});
+  restoring = false;
+  selectedId.value = "";
+  persist();
+}
+
+function onKey(event) {
+  if (event.key !== "Delete" && event.key !== "Backspace") return;
+  const tag = event.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
+  if (!selectedId.value) return;
+  event.preventDefault();
+  deleteSelected();
 }
 
 function onLive() {
@@ -303,9 +300,8 @@ function onLive() {
     const key = `${raw.interval}:${raw.open_time}`;
     if (seenClosed.has(key)) continue;
     seenClosed.add(key);
-    schedule(carry(raw));
+    schedule(toBar(raw));
   }
-  // pick newest open_time; stale forming leftovers from LiveHub must not freeze the chart
   const formingCandidates = state.forming.filter(
     (bar) => bar.market === props.market && bar.interval === props.interval && bar.closed === false,
   );
@@ -313,7 +309,7 @@ function onLive() {
     if (!best) return bar;
     return (bar.open_time || 0) >= (best.open_time || 0) ? bar : best;
   }, null);
-  if (forming) schedule(carry(forming));
+  if (forming) schedule(toBar(forming));
 }
 
 onMounted(() => {
@@ -361,6 +357,13 @@ onMounted(() => {
       },
     },
   });
+  chart.setStyles({
+    overlay: {
+      line: { color: "#d7a15f" },
+      point: { color: "#d7a15f", activeColor: "#7dba6a" },
+      text: { color: "#17190f", backgroundColor: "#d7a15f", borderColor: "#d7a15f" },
+    },
+  });
   const period = periodOf(props.interval);
   chart.setSymbol({
     ticker: props.market === "um" ? "ETHUSDT 永续" : "ETHUSDT 现货",
@@ -371,29 +374,37 @@ onMounted(() => {
   chart.setPaneOptions({ id: "candle_pane", minHeight: MAIN_PANE_PX });
   mountIndicators();
   chart.setDataLoader(loader());
+  applyBook(drawingKey(props.market, props.interval));
   reflow();
   resizeObserver = new ResizeObserver(() => reflow());
   resizeObserver.observe(scrollEl.value);
+  window.addEventListener("keydown", onKey);
 });
 
 watch(() => props.interval, (id) => {
   seenClosed = new Set();
+  persist();
   const period = periodOf(id);
   chart?.setPeriod({ span: period.span, type: period.type });
+  applyBook(drawingKey(props.market, id));
 });
 
 watch(() => props.market, (market) => {
   seenClosed = new Set();
+  persist();
   chart?.setSymbol({
     ticker: market === "um" ? "ETHUSDT 永续" : "ETHUSDT 现货",
     pricePrecision: 2,
     volumePrecision: 3,
   });
+  applyBook(drawingKey(market, props.interval));
 });
 
 watch(() => state.seq, onLive);
 
 onBeforeUnmount(() => {
+  persist();
+  window.removeEventListener("keydown", onKey);
   if (timer) clearTimeout(timer);
   resizeObserver?.disconnect();
   if (host.value) dispose(host.value);
@@ -425,9 +436,10 @@ onBeforeUnmount(() => {
         {{ item.label }}
       </button>
       <span class="split">画线</span>
-      <button v-for="tool in TOOLS" :key="tool.id" type="button" @click="draw(tool.id)">
+      <button v-for="tool in DRAW_TOOLS" :key="tool.id" type="button" @click="draw(tool.id)">
         {{ tool.label }}
       </button>
+      <button type="button" :disabled="!selectedId" @click="deleteSelected">删除</button>
       <button type="button" @click="clearDrawings">清除</button>
     </div>
     <p v-if="message" class="chart-note">{{ message }}</p>
