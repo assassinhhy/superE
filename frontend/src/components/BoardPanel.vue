@@ -1,12 +1,23 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { estimatePosition } from "../boardCalc.js";
-import { bumpLoss, loadCalc, loadLoss, lossState, saveCalc, saveLoss } from "../board.js";
+import {
+  boardFreshLine,
+  boardStaleSeconds,
+  bumpLoss,
+  loadCalc,
+  loadLoss,
+  lossState,
+  saveCalc,
+  saveLoss,
+} from "../board.js";
 
 const props = defineProps({
   view: { type: Object, default: null },
   offline: { type: Boolean, default: false },
   error: { type: String, default: "" },
+  fetchedAt: { default: null },
+  since: { default: null },
 });
 const emit = defineEmits(["focus"]);
 
@@ -14,6 +25,17 @@ const calcOpen = ref(false);
 const calc = ref(loadCalc());
 const loss = ref(loadLoss());
 const now = ref(Date.now());
+const clock = ref(Date.now());
+let clockTimer = null;
+
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    clock.value = Date.now();
+  }, 1000);
+});
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer);
+});
 
 watch(calc, (value) => saveCalc(value), { deep: true });
 watch(loss, (value) => saveLoss(value), { deep: true });
@@ -54,6 +76,28 @@ function planCalc(plan) {
 }
 
 const priceText = computed(() => px(props.view?.price?.value));
+const freshLine = computed(() => boardFreshLine(props.view, Number.isFinite(props.fetchedAt) ? props.fetchedAt : null));
+const staleSeconds = computed(() => {
+  const anchor = Number.isFinite(props.fetchedAt) ? props.fetchedAt : props.since;
+  return boardStaleSeconds(Number.isFinite(anchor) ? anchor : null, clock.value);
+});
+const oiAmount = computed(() => {
+  const value = Number(props.view?.oi?.value);
+  if (!Number.isFinite(value)) return props.view?.oi?.label || "未获取";
+  return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+});
+const liveMeta = computed(() => {
+  const parts = [];
+  const priceLabel = props.view?.price?.label;
+  if (priceLabel && priceLabel !== "未获取") parts.push(`价 ${priceLabel}`);
+  const funding = props.view?.funding;
+  if (typeof funding?.utc8 === "string" && funding.utc8.length >= 19) parts.push(`费率 ${funding.utc8.slice(11, 19)}`);
+  else if (funding?.source) parts.push(funding.source);
+  const oi = props.view?.oi;
+  if (oi?.label) parts.push(`OI ${oi.label}`);
+  if (oi?.source) parts.push(oi.source);
+  return parts.join(" · ");
+});
 const changeText = computed(() => {
   const ticker = props.view?.ticker;
   if (!ticker || ticker.status !== "ok" || ticker.value?.change_pct == null) return "";
@@ -82,6 +126,7 @@ function levelText(levels) {
 
 <template>
   <div class="board">
+    <p v-if="staleSeconds != null" class="board-stale">数据已过期 {{ staleSeconds }} 秒</p>
     <p v-if="offline" class="board-alert">盘面服务未启动</p>
     <p v-else-if="error" class="board-alert">{{ error }}</p>
     <template v-if="view">
@@ -101,7 +146,7 @@ function levelText(levels) {
       <p class="board-conclusion" :class="tone">{{ view.conclusion?.text }}</p>
       <p class="fine">{{ view.trend?.text }} · 位置：{{ view.position?.text || "未获取" }}</p>
 
-      <h2>走势要点</h2>
+      <h2 class="board-head">走势要点 <span class="board-fresh">{{ freshLine }}</span></h2>
       <ul class="board-list">
         <li v-for="(item, index) in view.bullets || []" :key="index">
           {{ item.text }}
@@ -110,7 +155,7 @@ function levelText(levels) {
         <li v-if="!(view.bullets || []).length" class="wait">这一截没有新的要点。</li>
       </ul>
 
-      <h2>合约情绪</h2>
+      <h2 class="board-head">合约情绪 <span class="board-fresh">{{ freshLine }}</span></h2>
       <p v-if="view.sentiment?.status !== 'ok'" class="wait">未获取 <span class="board-meta">{{ view.sentiment?.label || view.metrics?.label }}</span></p>
       <template v-else>
         <p>{{ view.sentiment.text }}</p>
@@ -122,12 +167,10 @@ function levelText(levels) {
         </p>
       </template>
       <p class="fine">
-        {{ view.funding?.text || "未获取" }}
-        <span class="board-meta">{{ view.funding?.source }}</span>
-      </p>
-      <p v-if="view.oi?.status !== 'ok'" class="fine wait">
-        实时 OI {{ view.oi?.label || "未获取" }}
-        <span v-if="view.limit?.active">{{ view.limit.message }}</span>
+        实时 最新价 {{ priceText }}
+        · {{ view.funding?.text || "未获取" }}
+        · OI {{ oiAmount }}
+        <span v-if="liveMeta" class="board-meta">{{ liveMeta }}</span>
       </p>
 
       <h2>技术</h2>
@@ -150,7 +193,7 @@ function levelText(levels) {
       <p class="fine">阻力 {{ levelText(view.levels?.resistance) || "—" }}</p>
       <p class="fine">支撑 {{ levelText(view.levels?.support) || "—" }}</p>
 
-      <h2>情景计划</h2>
+      <h2 class="board-head">情景计划 <span class="board-fresh">{{ freshLine }}</span></h2>
       <p class="fine">{{ view.plans_meta?.generated_utc8 }} 生成，{{ view.plans_meta?.valid_bars }} 根 15m 内有效</p>
       <p v-if="view.plans_meta?.paused" class="board-alert">{{ view.plans_meta.pause_reason || "情景计划暂停" }}</p>
       <article v-for="(plan, index) in view.plans || []" :key="plan.id" class="board-plan">

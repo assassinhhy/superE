@@ -1,9 +1,11 @@
 // Poll the board service and decide which in-page notices are due.
 import { BOARD_ORIGIN } from "./api.js";
-import { formatUtc8 } from "./indicators.js";
+import { formatUtc8, formatUtc8Clock } from "./indicators.js";
 import { pushNotice } from "./notify.js";
 
 export const BOARD_POLL_MS = 10_000;
+export const BOARD_STALE_MS = 30_000;
+export const FIFTEEN_MS = 15 * 60 * 1000;
 const LOSS_KEY = "supere.board.risk";
 const CALC_KEY = "supere.board.calc";
 
@@ -106,28 +108,95 @@ export function saveLoss(value, storage = globalThis.localStorage) {
   storage?.setItem?.(LOSS_KEY, JSON.stringify(value));
 }
 
+export function boardClock(view, fetchedAt) {
+  if (Number.isFinite(fetchedAt)) return formatUtc8Clock(fetchedAt);
+  const text = view?.as_of_utc8;
+  if (typeof text === "string" && text.length >= 19) return text.slice(11, 19);
+  return "—";
+}
+
+export function basisStamp(view) {
+  const basis = view?.basis;
+  if (basis?.close_utc8) {
+    return { close: basis.close_utc8, next: basis.next_close_utc8 || "" };
+  }
+  const asOf = Number(view?.as_of);
+  if (!Number.isFinite(asOf)) return { close: "", next: "" };
+  const closeBoundary = asOf - (asOf % FIFTEEN_MS);
+  const next = closeBoundary + FIFTEEN_MS;
+  return {
+    close: formatUtc8Clock(closeBoundary),
+    next: formatUtc8(next).slice(11, 16),
+  };
+}
+
+export function boardFreshLine(view, fetchedAt) {
+  const stamp = basisStamp(view);
+  const close = stamp.close || "—";
+  const next = stamp.next || "—";
+  return `更新于 ${boardClock(view, fetchedAt)} · 依据 15m 收线 ${close} · 下次重算 ${next}`;
+}
+
+/** Seconds since the last successful pull once the gap is past `limit`. Null while still fresh. */
+export function boardStaleSeconds(anchor, now, limit = BOARD_STALE_MS) {
+  if (!Number.isFinite(anchor) || !Number.isFinite(now)) return null;
+  const age = now - anchor;
+  if (age <= limit) return null;
+  return Math.floor(age / 1000);
+}
+
+export function applyBoardPoll(state, previous, outcome, now) {
+  const since = Number.isFinite(state?.since) ? state.since : now;
+  if (!outcome?.ok) {
+    return {
+      view: state?.view ?? null,
+      previous: previous ?? null,
+      offline: true,
+      error: outcome?.error || "盘面服务未启动",
+      fetchedAt: Number.isFinite(state?.fetchedAt) ? state.fetchedAt : null,
+      since,
+      events: [],
+    };
+  }
+  return {
+    view: outcome.view,
+    previous: outcome.view,
+    offline: false,
+    error: "",
+    fetchedAt: now,
+    since,
+    events: collectBoardEvents(previous, outcome.view),
+  };
+}
+
 let timer = null;
 let last = null;
 
 export function startBoardDesk(state, { fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
   if (timer) return;
   async function tick() {
+    const moment = now();
+    let outcome;
     try {
       const response = await fetchImpl(`${BOARD_ORIGIN}/api/board`);
       if (!response.ok) throw new Error(String(response.status));
-      const next = await response.json();
-      const moment = now();
-      for (const event of collectBoardEvents(last, next)) {
-        pushNotice(boardNotice(event, moment));
-      }
-      last = next;
-      state.view = next;
-      state.offline = false;
-      state.error = "";
+      outcome = { ok: true, view: await response.json() };
     } catch {
-      state.offline = true;
-      state.error = "盘面服务未启动";
+      outcome = { ok: false, error: "盘面服务未启动" };
     }
+    const applied = applyBoardPoll(
+      { view: state.view, fetchedAt: state.fetchedAt, since: state.since },
+      last,
+      outcome,
+      moment,
+    );
+    for (const event of applied.events) pushNotice(boardNotice(event, moment));
+    last = applied.previous;
+    state.view = applied.view;
+    state.offline = applied.offline;
+    state.error = applied.error;
+    state.fetchedAt = applied.fetchedAt;
+    state.since = applied.since;
   }
   tick();
   timer = setInterval(tick, BOARD_POLL_MS);

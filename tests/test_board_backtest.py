@@ -17,6 +17,9 @@ def test_half_at_t1_then_t2_deducts_round_trip_fee():
         bars, 0, side="short", entry=100, stop=102, targets=[96, 90], slippage_ticks=0,
     )
     assert result["outcome"] == "hit"
+    assert result["hit_t1"] is True
+    assert result["hit_t2"] is True
+    assert result["exit"] == "t2"
     assert abs(result["net"] - (0.5 * 4 + 0.5 * 10 - 0.1)) < 1e-9
     assert abs(result["rr"] - result["net"] / 2) < 1e-9
 

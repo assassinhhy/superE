@@ -228,6 +228,43 @@ def test_weekend_and_calendar_window(tmp_path: Path):
     assert loaded[0]["title"] == "美国 PPI"
 
 
+def test_basis_and_live_quotes_do_not_change_the_plan_math():
+    cfg = _cfg()
+    bars = [_bar(index, 100 - index * 0.05) for index in range(80)]
+    snapshot = {
+        "symbol": "ETHUSDT",
+        "now_ms": bars[-1]["close_time"] + 60_000,
+        "now_utc8": "1970-01-02 04:01:00",
+        "price": {"value": 1900.5, "status": "ok", "source": "币安 /fapi/v1/premiumIndex", "utc8": "1970-01-02 04:01:00", "label": "04:01:00"},
+        "ticker": {"status": "missing"},
+        "klines": {
+            frame: {"status": "ok", "bars": bars, "source": "fixture"}
+            for frame in ("5m", "15m", "1h", "4h", "1d")
+        },
+        "metrics": {"status": "missing", "rows": []},
+        "funding": {
+            "status": "ok",
+            "source": "币安 /fapi/v1/premiumIndex",
+            "utc8": "1970-01-02 04:01:00",
+            "value": {"rate": 0.0001, "mark": 1900.5, "next_funding_time": None},
+        },
+        "oi": {"status": "ok", "value": 12345.6, "label": "04:01:00", "utc8": "1970-01-02 04:01:00", "source": "币安 /fapi/v1/openInterest"},
+        "crosscheck": {"pause_plans": False, "message": ""},
+        "limit": {"active": False, "message": ""},
+        "events": [],
+        "calendar": [],
+    }
+    result = analyze(snapshot, cfg)
+    assert result["basis"]["close_ms"] == bars[-1]["close_time"]
+    assert result["basis"]["close_utc8"] == "04:00:00"
+    assert result["basis"]["next_close_utc8"] == "04:15"
+    assert result["funding"]["rate"] == 0.0001
+    assert result["funding"]["text"].startswith("费率")
+    assert result["oi"]["value"] == 12345.6
+    assert result["price"]["value"] == 1900.5
+    assert isinstance(result["plans"], list)
+
+
 def test_stale_metrics_are_not_used_in_the_conclusion():
     cfg = _cfg()
     bars = [_bar(index, 100 - index * 0.2, step=900_000) for index in range(80)]
@@ -273,6 +310,11 @@ def test_replay_20261114_1109_matches_the_call():
     assert result["sentiment"]["label"] == "多单在爆仓/平仓"
     assert "不在插针里追空" in result["conclusion"]["text"]
     assert result["disclaimer"] == DISCLAIMER
+    assert result["basis"]["frame"] == "15m"
+    assert result["basis"]["close_ms"] <= AT_1109
+    assert result["basis"]["close_utc8"] == "11:00:00"
+    assert result["basis"]["next_close_utc8"] == "11:15"
+    assert result["basis"]["next_close_ms"] - result["basis"]["close_ms"] == 900_000
 
 
 def test_replay_20261114_1351_is_a_middle_range():

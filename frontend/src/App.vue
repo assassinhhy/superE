@@ -22,7 +22,7 @@ const settings = ref(false);
 const clock = ref(formatUtc8(Date.now()));
 const divergence = ref(false);
 const focusPlan = ref("");
-const board = reactive({ view: null, offline: false, error: "" });
+const board = reactive({ view: null, offline: false, error: "", fetchedAt: null, since: null });
 
 try {
   divergence.value = localStorage.getItem("supere.divergence") === "1";
@@ -107,6 +107,8 @@ onMounted(() => {
           :view="board.view"
           :offline="board.offline"
           :error="board.error"
+          :fetched-at="board.fetchedAt"
+          :since="board.since"
           @focus="focusPlan = $event"
         />
         <SidePanel

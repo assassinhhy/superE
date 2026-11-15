@@ -64,10 +64,20 @@ def simulate_trade(
     entry_fill = _slip(entry, side, slippage_ticks, exiting=False)
     planned_risk = abs(entry - stop)
     if planned_risk <= 0 or not targets:
-        return {"outcome": "invalid", "rr": 0.0, "bars_used": 0, "net": 0.0}
+        return {
+            "outcome": "invalid",
+            "rr": 0.0,
+            "bars_used": 0,
+            "net": 0.0,
+            "hit_t1": False,
+            "hit_t2": False,
+            "exit": "invalid",
+        }
     t1 = targets[0]
     t2 = targets[1] if len(targets) > 1 else None
     half = False
+    hit_t2 = False
+    exit_reason = "timeout"
     end = min(len(bars), entry_index + 1 + horizon)
     outcome = "invalid"
     exit_pnl = 0.0
@@ -79,37 +89,54 @@ def simulate_trade(
             step = _touch(bar, side, stop, t1)
             if step == "stop":
                 outcome = "fail"
+                exit_reason = "stop"
                 exit_pnl = _leg(side, entry_fill, _slip(stop, side, slippage_ticks, exiting=True))
                 break
             if step == "target":
                 half = True
                 outcome = "hit"
+                exit_reason = "t1"
                 exit_pnl = 0.5 * _leg(side, entry_fill, _slip(t1, side, slippage_ticks, exiting=True))
                 if t2 is None:
                     break
                 rest = _touch(bar, side, stop, t2)
                 if rest == "stop":
+                    exit_reason = "t1_stop"
                     exit_pnl += 0.5 * _leg(side, entry_fill, _slip(stop, side, slippage_ticks, exiting=True))
                     break
                 if rest == "target":
+                    hit_t2 = True
+                    exit_reason = "t2"
                     exit_pnl += 0.5 * _leg(side, entry_fill, _slip(t2, side, slippage_ticks, exiting=True))
                     break
             continue
         rest = _touch(bar, side, stop, t2)
         if rest == "stop":
+            exit_reason = "t1_stop"
             exit_pnl += 0.5 * _leg(side, entry_fill, _slip(stop, side, slippage_ticks, exiting=True))
             break
         if rest == "target":
+            hit_t2 = True
+            exit_reason = "t2"
             exit_pnl += 0.5 * _leg(side, entry_fill, _slip(t2, side, slippage_ticks, exiting=True))
             break
     else:
         if half:
+            exit_reason = "t1_timeout"
             last = bars[end - 1]["close"] if end > entry_index + 1 else entry
             exit_pnl += 0.5 * _leg(side, entry_fill, _slip(last, side, slippage_ticks, exiting=True))
     fee = entry * fee_rate * 2
     net = exit_pnl - fee
     rr = net / planned_risk if planned_risk else 0.0
-    return {"outcome": outcome, "rr": rr, "bars_used": used, "net": net}
+    return {
+        "outcome": outcome,
+        "rr": rr,
+        "bars_used": used,
+        "net": net,
+        "hit_t1": outcome == "hit",
+        "hit_t2": hit_t2,
+        "exit": exit_reason,
+    }
 
 
 def _leg(side: str, entry_fill: float, exit_fill: float) -> float:
@@ -201,9 +228,13 @@ def walk(
             trades.append(
                 {
                     "kind": plan["kind"],
+                    "title": plan.get("title") or plan["kind"],
                     "side": plan["side"],
                     "weekend": weekend,
                     "entry_ms": bar["close_time"],
+                    "entry": entry,
+                    "stop": plan["stop"],
+                    "targets": [float(price) for price in plan["targets"]],
                     **sim,
                 }
             )
@@ -217,6 +248,7 @@ def walk(
             "by_kind": _group(trades, "kind"),
             "by_side": _group(trades, "side"),
             "by_weekend": _group(trades, "weekend"),
+            "trades": trades,
         }
     )
     return summary
