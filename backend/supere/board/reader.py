@@ -79,6 +79,25 @@ class MainReader:
             bars = [bar for bar in bars if bar["close_time"] <= int(as_of_ms)]
         return bars
 
+    def klines_between(self, symbol: str, interval: str, start_ms: int, end_ms: int, *, limit: int = 5000) -> list[dict]:
+        """Closed bars with ``open_time`` in ``[start_ms, end_ms]``. Read only."""
+        if self.db is None:
+            return []
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT * FROM klines
+                WHERE market='um' AND symbol=? AND interval=?
+                  AND open_time>=? AND open_time<=?
+                ORDER BY open_time ASC
+                LIMIT ?
+                """,
+                (symbol, interval, int(start_ms), int(end_ms), int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [bar_from_row(row) for row in rows]
+
     def metrics(self, symbol: str, *, limit: int, as_of_ms: int | None = None) -> list[dict]:
         if self.db is None:
             return []

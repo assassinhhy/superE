@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, ROUND_HALF_UP
+
 from supere.board.calc import estimate
 from supere.board.confirm import confirm_bar
 from supere.board.indicators import last_value
+from supere.intervals import INTERVAL_MS
+from supere.timeutil import format_utc8
+
+# Bump when the entry, stop, or target rules change. Stored on every journal row.
+RULES_VERSION = "fixed-entry-1"
+FIFTEEN_MS = INTERVAL_MS["15m"]
 
 
 def _fmt(value: float) -> str:
@@ -107,6 +115,167 @@ def _confirmed(side: str, zone: tuple[float, float], packs: dict, analysis, atr:
     return seen
 
 
+def round_to_tick(price: float, tick: float) -> float:
+    """Nearest tick, half away from zero via ``ROUND_HALF_UP`` on the tick grid."""
+    if tick <= 0:
+        return float(price)
+    step = Decimal(str(tick))
+    units = (Decimal(str(price)) / step).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return float(units * step)
+
+
+def _nearer_end(low: float, high: float, key: float, side: str) -> float:
+    """Range end closer to ``key``. A tie uses the end the stop is measured from.
+
+    The live trend zone is ``key ± band``, so both ends are the same distance
+    from the level. The tie goes to the high end of a short (the pullback has
+    to reach resistance) and the low end of a long (the pullback has to reach
+    support).
+    """
+    if abs(low - key) + 1e-9 < abs(high - key):
+        return low
+    if abs(high - key) + 1e-9 < abs(low - key):
+        return high
+    return high if side == "short" else low
+
+
+def fixed_entry_price(
+    *,
+    kind: str,
+    side: str,
+    entry_low: float,
+    entry_high: float,
+    key: float,
+    atr: float,
+    tick: float,
+    offset_atr: float = 0.1,
+) -> float:
+    """One price inside the published entry range, rounded to the tick.
+
+    * 顺势 pullback: the range end nearer the key level (tie: stop-side end).
+    * 破位 breakout/breakdown: key ± ``offset_atr`` × ATR, in the trade direction.
+    * 逆势 stop-sweep: the midpoint of the range.
+    """
+    if kind == "破位":
+        raw = key + offset_atr * atr if side == "long" else key - offset_atr * atr
+    elif kind == "逆势":
+        raw = (entry_low + entry_high) / 2.0
+    elif kind == "顺势":
+        raw = _nearer_end(entry_low, entry_high, key, side)
+    else:
+        raw = (entry_low + entry_high) / 2.0
+    return round_to_tick(raw, tick)
+
+
+def r_multiples(entry: float, stop: float | None, side: str, targets: list[float]) -> tuple[float | None, float | None, float | None]:
+    """Stop distance and T1/T2 R from the fixed entry. Reward is price, before fees."""
+    if stop is None:
+        return None, None, None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return risk, None, None
+
+    def reward(target: float | None) -> float | None:
+        if target is None:
+            return None
+        move = (target - entry) if side == "long" else (entry - target)
+        return move / risk
+
+    t1 = targets[0] if targets else None
+    t2 = targets[1] if len(targets) > 1 else None
+    return risk, reward(t1), reward(t2)
+
+
+def _priced(
+    *,
+    rule_id: str,
+    kind: str,
+    title: str,
+    side: str,
+    status: str,
+    entry_low: float,
+    entry_high: float,
+    stop: float | None,
+    targets: list[float],
+    size_ratio: float,
+    note: str,
+    names: list[str],
+    analysis,
+    atr: float,
+    key: float,
+    entry_rule: str,
+    line: float | None = None,
+) -> dict:
+    cfg = analysis.plans
+    entry = fixed_entry_price(
+        kind=kind,
+        side=side,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        key=key,
+        atr=atr,
+        tick=cfg.tick,
+        offset_atr=cfg.breakout_entry_atr,
+    )
+    risk, t1_r, t2_r = r_multiples(entry, stop, side, targets)
+    calc = None
+    if stop is not None and size_ratio:
+        calc = _calc(entry, stop, side, targets, atr, analysis, size_ratio)
+    plan = {
+        "id": rule_id,
+        "kind": kind,
+        "title": title,
+        "side": side,
+        "status": status,
+        "entry": entry,
+        "entry_rule": entry_rule,
+        "key_level": key,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "stop": stop,
+        "targets": targets,
+        "r_distance": risk,
+        "t1_r": t1_r,
+        "t2_r": t2_r,
+        "size_ratio": size_ratio,
+        "note": note,
+        "confirm": {"ok": bool(names), "names": names},
+        "calc": calc,
+    }
+    if line is not None:
+        plan["line"] = line
+    return plan
+
+
+def stamp_plan_times(plans: list[dict], meta: dict, *, boundary_ms: int | None, valid_bars: int, interval_ms: int = FIFTEEN_MS) -> None:
+    """Stamp every plan with the closed 15m bar it used and the hour it expires.
+
+    ``boundary_ms`` is the candle's quoted close (HH:MM UTC+8), not the poll time.
+    Expiry is ``valid_bars`` steps later. Four 15m bars is one hour: 21:45 → 22:45.
+    """
+    if boundary_ms is None:
+        return
+    boundary = int(boundary_ms)
+    expires = boundary + int(valid_bars) * int(interval_ms)
+    clock = format_utc8(boundary, "%H:%M")
+    until = format_utc8(expires, "%H:%M")
+    text = f"{clock} 生成 · 有效至 {until}"
+    meta["generated_utc8"] = clock
+    meta["generated_ms"] = boundary
+    meta["basis_close_ms"] = boundary
+    meta["basis_close_utc8"] = clock
+    meta["expires_ms"] = expires
+    meta["expires_utc8"] = until
+    meta["validity"] = text
+    for plan in plans:
+        plan["generated_ms"] = boundary
+        plan["generated_utc8"] = clock
+        plan["basis_close_ms"] = boundary
+        plan["expires_ms"] = expires
+        plan["expires_utc8"] = until
+        plan["validity"] = text
+
+
 def build_plans(
     *,
     bias: str,
@@ -168,23 +337,25 @@ def build_plans(
         targets = [level["price"] for level in other[:2]]
         zone = (entry_low, entry_high)
         names = _confirmed(side, zone, packs, analysis, atr15)
-        entry = (entry_low + entry_high) / 2
         add(
-            {
-                "id": "trend",
-                "kind": "顺势",
-                "title": title,
-                "side": side,
-                "status": "可进场" if names else "等待信号",
-                "entry_low": entry_low,
-                "entry_high": entry_high,
-                "stop": stop,
-                "targets": targets,
-                "size_ratio": 1.0,
-                "note": "",
-                "confirm": {"ok": bool(names), "names": names},
-                "calc": _calc(entry, stop, side, targets, atr15, analysis, 1.0),
-            }
+            _priced(
+                rule_id="trend",
+                kind="顺势",
+                title=title,
+                side=side,
+                status="可进场" if names else "等待信号",
+                entry_low=entry_low,
+                entry_high=entry_high,
+                stop=stop,
+                targets=targets,
+                size_ratio=1.0,
+                note="",
+                names=names,
+                analysis=analysis,
+                atr=atr15,
+                key=center,
+                entry_rule="trend_near_key",
+            )
         )
 
     if rng:
@@ -204,22 +375,26 @@ def build_plans(
             (bar["close"] < rng["low"] if side == "short" else bar["close"] > rng["high"])
             for bar in packs["15m"]["bars"][-plans_cfg.valid_bars_15m:]
         )
+        shown = names if broken else []
         add(
-            {
-                "id": "breakout",
-                "kind": "破位",
-                "title": "破位空" if side == "short" else "破位多",
-                "side": side,
-                "status": "可进场" if broken and names else "等待信号",
-                "entry_low": zone[0],
-                "entry_high": zone[1],
-                "stop": stop,
-                "targets": targets,
-                "size_ratio": 1.0,
-                "note": note,
-                "confirm": {"ok": bool(broken and names), "names": names if broken else []},
-                "calc": _calc((zone[0] + zone[1]) / 2, stop, side, targets, atr15, analysis, 1.0),
-            }
+            _priced(
+                rule_id="breakout",
+                kind="破位",
+                title="破位空" if side == "short" else "破位多",
+                side=side,
+                status="可进场" if broken and names else "等待信号",
+                entry_low=zone[0],
+                entry_high=zone[1],
+                stop=stop,
+                targets=targets,
+                size_ratio=1.0,
+                note=note,
+                names=shown,
+                analysis=analysis,
+                atr=atr15,
+                key=edge,
+                entry_rule="breakout_atr",
+            )
         )
 
     counter_side = "long" if side == "short" else "short"
@@ -241,21 +416,24 @@ def build_plans(
             title = "逆势轻仓空"
             note = f"扫 {_fmt(level)} 后 15m 收回其下才看，半仓，不在插针里追"
         add(
-            {
-                "id": "counter",
-                "kind": "逆势",
-                "title": title,
-                "side": counter_side,
-                "status": "可进场" if names else "等待信号",
-                "entry_low": zone[0],
-                "entry_high": zone[1],
-                "stop": stop,
-                "targets": targets,
-                "size_ratio": plans_cfg.counter_size_ratio,
-                "note": note,
-                "confirm": {"ok": bool(names), "names": names},
-                "calc": _calc((zone[0] + zone[1]) / 2, stop, counter_side, targets, atr15, analysis, plans_cfg.counter_size_ratio),
-            }
+            _priced(
+                rule_id="counter",
+                kind="逆势",
+                title=title,
+                side=counter_side,
+                status="可进场" if names else "等待信号",
+                entry_low=zone[0],
+                entry_high=zone[1],
+                stop=stop,
+                targets=targets,
+                size_ratio=plans_cfg.counter_size_ratio,
+                note=note,
+                names=names,
+                analysis=analysis,
+                atr=atr15,
+                key=level,
+                entry_rule="counter_mid",
+            )
         )
 
     ema15 = last_value(packs["15m"]["ema"].get(50, [])) if packs.get("15m") else None
@@ -267,26 +445,30 @@ def build_plans(
             or _closes_beyond(packs.get("1h", {}).get("bars", []), line, side, plans_cfg.flip_closes_1h)
             or _closes_beyond(packs.get("4h", {}).get("bars", []), line, side, plans_cfg.flip_closes_4h)
         )
+        flip_side = "long" if side == "short" else "short"
         add(
-            {
-                "id": "flip",
-                "kind": "翻转",
-                "title": "翻转条件",
-                "side": "long" if side == "short" else "short",
-                "status": "已触发" if flipped else "等待信号",
-                "entry_low": line,
-                "entry_high": line,
-                "stop": None,
-                "targets": [],
-                "size_ratio": 0,
-                "note": (
+            _priced(
+                rule_id="flip",
+                kind="翻转",
+                title="翻转条件",
+                side=flip_side,
+                status="已触发" if flipped else "等待信号",
+                entry_low=line,
+                entry_high=line,
+                stop=None,
+                targets=[],
+                size_ratio=0,
+                note=(
                     f"15m 连续 {plans_cfg.flip_closes_15m} 根，或 1h/4h 各 {plans_cfg.flip_closes_1h} 根，"
                     f"收在 {_fmt(line)} {'上' if side == 'short' else '下'} → 当前方向作废"
                 ),
-                "confirm": {"ok": flipped, "names": ["收稳"] if flipped else []},
-                "calc": None,
-                "line": line,
-            }
+                names=["收稳"] if flipped else [],
+                analysis=analysis,
+                atr=atr15,
+                key=line,
+                entry_rule="flip_line",
+                line=line,
+            )
         )
         if flipped:
             meta["invalidated"] = True

@@ -120,6 +120,10 @@ class PlansSection(BaseModel):
     stop_atr1h_factor: float = 0.35
     breakout_retest_atr: float = 0.2
     breakout_stop_atr: float = 0.6
+    # Breakout/breakdown fixed entry sits this many ATR15m through the key level.
+    breakout_entry_atr: float = 0.1
+    # ETHUSDT USDT-M tick. Fixed entries are rounded to this.
+    tick: float = 0.01
     counter_size_ratio: float = 0.5
     flip_closes_15m: int = 2
     flip_closes_1h: int = 1

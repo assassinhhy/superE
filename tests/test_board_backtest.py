@@ -1,6 +1,9 @@
 """Trade accounting for the board backtest. The 3-month run is a script, not this file."""
 
-from supere.board.backtest import notify_gate, simulate_trade
+from pathlib import Path
+
+from supere.board.backtest import notify_gate, simulate_trade, walk_compare
+from supere.board.settings import load_analysis
 
 
 def _bar(high, low, close=None):
@@ -55,3 +58,56 @@ def test_neither_target_nor_stop_inside_24h_is_invalid_and_later_bars_are_ignore
     assert result["outcome"] == "invalid"
     assert notify_gate({"counted": 49, "hit_rate": 0.5, "avg_rr": 2}) is False
     assert notify_gate({"counted": 50, "hit_rate": 0.45, "avg_rr": 1.3}) is True
+
+
+def _kline(index, close, high, low):
+    step = 900_000
+    open_time = index * step
+    return {
+        "open_time": open_time,
+        "close_time": open_time + step - 1,
+        "open": close,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": 10.0,
+        "taker_buy": 4.0,
+    }
+
+
+def test_fixed_fill_waits_for_a_touch_and_the_range_fill_does_not(monkeypatch):
+    plan = {
+        "id": "trend",
+        "kind": "顺势",
+        "title": "顺势反抽空",
+        "side": "short",
+        "status": "可进场",
+        "entry": 100.0,
+        "entry_low": 99.0,
+        "entry_high": 101.0,
+        "stop": 103.0,
+        "targets": [96.0],
+    }
+
+    def fake_analyze(_snapshot, _cfg):
+        return {
+            "plans": [plan],
+            "plans_meta": {"paused": False},
+            "position": {"blocked": False},
+            "risk": {"events": [], "weekend": False},
+        }
+
+    monkeypatch.setattr("supere.board.backtest.analyze", fake_analyze)
+    bars = [_kline(index, 110, 111, 109) for index in range(12)]
+    fixture = {"frames": {"15m": bars}, "metrics": []}
+    cfg, _path = load_analysis(str(Path(__file__).resolve().parents[1] / "analysis.toml"))
+    both = walk_compare(fixture, cfg, factor=0.35, slippage_ticks=0, fee_rate=0, min_bars=5)
+    assert both["range"]["signals"] >= 1
+    assert both["fixed"]["signals"] == 0
+    assert both["fixed"]["unfilled"] > 0
+
+    bars[6] = _kline(6, 100, 111, 90)
+    touched = walk_compare(fixture, cfg, factor=0.35, slippage_ticks=0, fee_rate=0, min_bars=5)
+    assert touched["fixed"]["signals"] == 1
+    assert touched["fixed"]["trades"][0]["entry"] == 100
+    assert touched["fixed"]["trades"][0]["outcome"] == "fail"

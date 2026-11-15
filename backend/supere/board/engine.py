@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from supere.board.indicators import last_value, pack_bars
 from supere.board.levels import build_levels
-from supere.board.plans import build_plans
+from supere.board.plans import FIFTEEN_MS, build_plans, stamp_plan_times
 from supere.board.range_ import build_range
 from supere.board.risk import assess
 from supere.board.sentiment import aligned_oi, crowding, funding_heat, quadrant, taker_pressure, volume_spike
@@ -237,6 +237,7 @@ def _basis(packs: dict) -> dict:
     empty = {
         "frame": "15m",
         "close_ms": None,
+        "boundary_ms": None,
         "close_utc8": None,
         "next_close_ms": None,
         "next_close_utc8": None,
@@ -255,6 +256,7 @@ def _basis(packs: dict) -> dict:
     return {
         "frame": "15m",
         "close_ms": close_ms,
+        "boundary_ms": boundary,
         "close_utc8": format_utc8(boundary, "%H:%M:%S"),
         "next_close_ms": next_boundary - 1,
         "next_close_utc8": format_utc8(next_boundary, "%H:%M"),
@@ -393,14 +395,23 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
         snapshot.get("calendar") or [],
         analysis.risk,
     )
-    meta["generated_utc8"] = format_utc8(int(snapshot.get("now_ms") or 0), "%H:%M")
+    basis = _basis(packs)
+    stamp_plan_times(
+        plans,
+        meta,
+        boundary_ms=basis.get("boundary_ms"),
+        valid_bars=analysis.plans.valid_bars_15m,
+        interval_ms=FIFTEEN_MS,
+    )
+    if basis.get("boundary_ms") is None:
+        meta["generated_utc8"] = format_utc8(int(snapshot.get("now_ms") or 0), "%H:%M")
     return {
         "symbol": snapshot.get("symbol") or analysis.board.symbol,
         "as_of": snapshot.get("now_ms"),
         "as_of_utc8": snapshot.get("now_utc8") or format_utc8(int(snapshot.get("now_ms") or 0)),
         "price": price_block,
         "ticker": snapshot.get("ticker"),
-        "basis": _basis(packs),
+        "basis": basis,
         "funding": _funding_line(snapshot, analysis),
         "oi": _oi_view(snapshot),
         "crosscheck": cross,

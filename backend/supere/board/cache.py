@@ -32,6 +32,9 @@ class BoardCache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(_SCHEMA)
 
     def close(self) -> None:
@@ -93,6 +96,22 @@ class BoardCache:
                     "source": row["source"],
                 }
             )
+        return out
+
+    def klines_between(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT payload FROM points
+            WHERE kind=? AND symbol=? AND ts>=? AND ts<=?
+            ORDER BY ts ASC
+            """,
+            (f"kline:{interval}", symbol, int(start_ms), int(end_ms)),
+        ).fetchall()
+        out = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if isinstance(payload, dict) and payload.get("open_time") is not None:
+                out.append(payload)
         return out
 
     def add_event(self, ts: int, kind: str, detail: dict) -> None:

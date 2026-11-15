@@ -1,9 +1,13 @@
 """Replay the same analyzer over closed 15m bars. No orders, no lookahead.
 
+The default fill waits until a later 15m bar touches the plan's fixed entry, and
+fills at that price. ``fill='range'`` is the previous rule: the close when it
+sits in the zone, otherwise the midpoint, with no touch required.
+
 Hit: target 1 is traded before the stop. Fail: the stop is first. Invalid: neither
 within 24 hours. A bar that touches both is counted as a stop. Round-trip taker
-fee is ``0.05% × 2`` of the entry price, subtracted in price units. The slippage
-pass fills one tick worse on the way in and on the way out.
+fee is ``0.05% × 2`` of the entry price, subtracted in price units. Maker is
+``0.02% × 2``. The slippage pass fills one tick worse on the way in and on the way out.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from supere.board.settings import AnalysisConfig
 from supere.timeutil import UTC8
 
 FEE_RATE = 0.0005
+TAKER_FEE = FEE_RATE
+MAKER_FEE = 0.0002
 TICK = 0.01
 HORIZON_BARS = 96  # 24 hours of 15m
 
@@ -72,6 +78,7 @@ def simulate_trade(
             "hit_t1": False,
             "hit_t2": False,
             "exit": "invalid",
+            "gross": 0.0,
         }
     t1 = targets[0]
     t2 = targets[1] if len(targets) > 1 else None
@@ -133,6 +140,7 @@ def simulate_trade(
         "rr": rr,
         "bars_used": used,
         "net": net,
+        "gross": exit_pnl,
         "hit_t1": outcome == "hit",
         "hit_t2": hit_t2,
         "exit": exit_reason,
@@ -177,6 +185,129 @@ def _group(trades: list[dict], key: str) -> dict:
     return {name: _summarize(rows) for name, rows in sorted(buckets.items())}
 
 
+def _range_entry(plan: dict, close: float) -> float:
+    """Legacy fill: the close when it sits in the zone, otherwise the midpoint."""
+    low = float(plan["entry_low"])
+    high = float(plan["entry_high"])
+    if low <= close <= high:
+        return close
+    return (low + high) / 2.0
+
+
+def _touch_index(bars: list[dict], index: int, entry: float, valid_bars: int) -> int | None:
+    """First bar after the signal whose range touches ``entry``, inside the plan life."""
+    last = min(len(bars), index + 1 + int(valid_bars))
+    for cursor in range(index + 1, last):
+        bar = bars[cursor]
+        if float(bar["low"]) <= entry <= float(bar["high"]):
+            return cursor
+    return None
+
+
+def _ready(plan: dict) -> bool:
+    return (
+        plan.get("kind") in {"顺势", "破位", "逆势"}
+        and plan.get("status") == "可进场"
+        and plan.get("stop") is not None
+        and bool(plan.get("targets"))
+    )
+
+
+def _open_trade(
+    bars: list[dict],
+    index: int,
+    plan: dict,
+    *,
+    fill: str,
+    valid_bars: int,
+    horizon: int,
+    fee_rate: float,
+    slippage_ticks: int,
+    weekend: bool,
+) -> tuple[dict | None, int | None]:
+    """Return ``(trade, busy_until)``. ``trade`` is None when the plan does not fill.
+
+    ``busy_until`` is the bar index the same plan id stays locked through.
+    A fixed-entry miss locks the validity window so the same idea is not counted
+    again on every 15m bar.
+    """
+    signal = bars[index]
+    if fill == "range":
+        entry = _range_entry(plan, float(signal["close"]))
+        entry_index = index
+        entry_ms = int(signal["close_time"])
+    elif fill == "fixed":
+        if plan.get("entry") is None:
+            return None, None
+        entry = float(plan["entry"])
+        touched = _touch_index(bars, index, entry, valid_bars)
+        if touched is None:
+            return None, index + int(valid_bars)
+        # The fill bar is the first bar of the path, so a stop on that bar counts.
+        entry_index = touched - 1
+        entry_ms = int(bars[touched]["close_time"])
+    else:
+        raise ValueError(fill)
+    sim = simulate_trade(
+        bars,
+        entry_index,
+        side=plan["side"],
+        entry=entry,
+        stop=plan["stop"],
+        targets=plan["targets"],
+        horizon=horizon,
+        fee_rate=fee_rate,
+        slippage_ticks=slippage_ticks,
+    )
+    trade = {
+        "kind": plan["kind"],
+        "title": plan.get("title") or plan["kind"],
+        "side": plan["side"],
+        "weekend": weekend,
+        "signal_ms": int(signal["close_time"]),
+        "entry_ms": entry_ms,
+        "entry": entry,
+        "stop": plan["stop"],
+        "targets": [float(price) for price in plan["targets"]],
+        "fill": fill,
+        **sim,
+    }
+    busy = entry_index + max(sim["bars_used"], 1) + 1
+    return trade, busy
+
+
+def _pack(trades: list[dict], missed: list[dict], *, factor: float, slippage_ticks: int, fee_rate: float, fill: str) -> dict:
+    summary = _summarize(trades)
+    summary.update(
+        {
+            "factor": factor,
+            "slippage_ticks": slippage_ticks,
+            "fee_rate": fee_rate,
+            "fill": fill,
+            "unfilled": len(missed),
+            "missed": missed,
+            "by_kind": _group(trades, "kind"),
+            "by_side": _group(trades, "side"),
+            "by_weekend": _group(trades, "weekend"),
+            "trades": trades,
+        }
+    )
+    return summary
+
+
+def _signals(fixture: dict, cfg: AnalysisConfig, bar: dict):
+    result = analyze(snapshot_at(fixture, bar["close_time"], cfg), cfg)
+    if result.get("position") and result["position"].get("blocked"):
+        return None
+    if result.get("plans_meta", {}).get("paused"):
+        return None
+    if any(item.get("blocking") for item in result.get("risk", {}).get("events") or []):
+        return None
+    weekend = bool(result.get("risk", {}).get("weekend"))
+    ready = [plan for plan in result.get("plans") or [] if _ready(plan)]
+    return ready, weekend
+
+
 def walk(
     fixture: dict,
     analysis: AnalysisConfig,
@@ -186,72 +317,132 @@ def walk(
     fee_rate: float = FEE_RATE,
     horizon: int = HORIZON_BARS,
     min_bars: int = 80,
+    fill: str = "fixed",
+    start_ms: int | None = None,
+    end_ms: int | None = None,
 ) -> dict:
+    """Replay plans. ``fill='fixed'`` waits for a touch of the fixed entry.
+
+    ``fill='range'`` is the previous rule: enter at the close inside the zone,
+    otherwise at the midpoint, without waiting for a touch.
+    """
+    compared = walk_compare(
+        fixture,
+        analysis,
+        factor=factor,
+        slippage_ticks=slippage_ticks,
+        fee_rate=fee_rate,
+        horizon=horizon,
+        min_bars=min_bars,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        fills=(fill,),
+    )
+    return compared[fill]
+
+
+def walk_compare(
+    fixture: dict,
+    analysis: AnalysisConfig,
+    *,
+    factor: float,
+    slippage_ticks: int,
+    fee_rate: float = FEE_RATE,
+    horizon: int = HORIZON_BARS,
+    min_bars: int = 80,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    fills: tuple[str, ...] = ("range", "fixed"),
+) -> dict[str, dict]:
+    """One ``analyze`` pass, then both fill rules. Signals outside the window are skipped."""
     cfg = analysis.model_copy(deep=True)
     cfg.plans.stop_atr1h_factor = factor
+    valid_bars = cfg.plans.valid_bars_15m
     bars = fixture["frames"].get("15m") or []
-    trades: list[dict] = []
-    busy_until: dict[str, int] = {}
+    trades: dict[str, list] = {name: [] for name in fills}
+    missed: dict[str, list] = {name: [] for name in fills}
+    busy: dict[str, dict[str, int]] = {name: {} for name in fills}
     for index, bar in enumerate(bars):
         if index < min_bars:
             continue
-        if busy_until and all(until > index for until in busy_until.values()) and len(busy_until) >= 3:
+        close_time = int(bar["close_time"])
+        if start_ms is not None and close_time < int(start_ms):
             continue
-        result = analyze(snapshot_at(fixture, bar["close_time"], cfg), cfg)
-        if result.get("position") and result["position"].get("blocked"):
+        if end_ms is not None and close_time > int(end_ms):
             continue
-        if result.get("plans_meta", {}).get("paused"):
+        if all(busy[name] and all(until > index for until in busy[name].values()) and len(busy[name]) >= 3 for name in fills):
             continue
-        if any(item.get("blocking") for item in result.get("risk", {}).get("events") or []):
+        opened = _signals(fixture, cfg, bar)
+        if opened is None:
             continue
-        weekend = bool(result.get("risk", {}).get("weekend"))
-        for plan in result.get("plans") or []:
-            if plan.get("kind") not in {"顺势", "破位", "逆势"}:
-                continue
-            if plan.get("status") != "可进场" or plan.get("stop") is None or not plan.get("targets"):
-                continue
-            if busy_until.get(plan["id"], -1) > index:
-                continue
-            close = bar["close"]
-            entry = close if plan["entry_low"] <= close <= plan["entry_high"] else (plan["entry_low"] + plan["entry_high"]) / 2
-            sim = simulate_trade(
-                bars,
-                index,
-                side=plan["side"],
-                entry=entry,
-                stop=plan["stop"],
-                targets=plan["targets"],
-                horizon=horizon,
-                fee_rate=fee_rate,
-                slippage_ticks=slippage_ticks,
-            )
-            trades.append(
-                {
-                    "kind": plan["kind"],
-                    "title": plan.get("title") or plan["kind"],
-                    "side": plan["side"],
-                    "weekend": weekend,
-                    "entry_ms": bar["close_time"],
-                    "entry": entry,
-                    "stop": plan["stop"],
-                    "targets": [float(price) for price in plan["targets"]],
-                    **sim,
-                }
-            )
-            busy_until[plan["id"]] = index + 1 + max(sim["bars_used"], 1)
-    summary = _summarize(trades)
-    summary.update(
-        {
-            "factor": factor,
-            "slippage_ticks": slippage_ticks,
-            "fee_rate": fee_rate,
-            "by_kind": _group(trades, "kind"),
-            "by_side": _group(trades, "side"),
-            "by_weekend": _group(trades, "weekend"),
-            "trades": trades,
-        }
+        ready, weekend = opened
+        for plan in ready:
+            for name in fills:
+                if busy[name].get(plan["id"], -1) > index:
+                    continue
+                trade, until = _open_trade(
+                    bars,
+                    index,
+                    plan,
+                    fill=name,
+                    valid_bars=valid_bars,
+                    horizon=horizon,
+                    fee_rate=fee_rate,
+                    slippage_ticks=slippage_ticks,
+                    weekend=weekend,
+                )
+                if until is not None:
+                    busy[name][plan["id"]] = until
+                if trade is None:
+                    if name == "fixed":
+                        missed[name].append({"signal_ms": close_time, "kind": plan["kind"], "side": plan["side"]})
+                    continue
+                trades[name].append(trade)
+    return {
+        name: _pack(trades[name], missed[name], factor=factor, slippage_ticks=slippage_ticks, fee_rate=fee_rate, fill=name)
+        for name in fills
+    }
+
+
+def reprice(summary: dict, fee_rate: float) -> dict:
+    """Recompute net R from stored gross price PnL. Invalid trades stay invalid."""
+    trades = []
+    for trade in summary.get("trades") or []:
+        gross = float(trade.get("gross") if trade.get("gross") is not None else trade.get("net") or 0.0)
+        risk = abs(float(trade["entry"]) - float(trade["stop"]))
+        net = gross - float(trade["entry"]) * fee_rate * 2
+        trades.append({**trade, "net": net, "rr": (net / risk) if risk else 0.0, "fee_rate": fee_rate, "gross": gross})
+    packed = _pack(
+        trades,
+        list(summary.get("missed") or []),
+        factor=summary.get("factor", 0.0),
+        slippage_ticks=summary.get("slippage_ticks", 0),
+        fee_rate=fee_rate,
+        fill=summary.get("fill") or "",
     )
-    return summary
+    return packed
+
+
+def slice_window(summary: dict, start_ms: int, end_ms: int) -> dict:
+    """Keep trades and unfilled plans whose signal bar closed inside the window."""
+    trades = [
+        trade
+        for trade in summary.get("trades") or []
+        if start_ms <= int(trade.get("signal_ms") or trade.get("entry_ms") or 0) <= end_ms
+    ]
+    missed = [
+        item
+        for item in summary.get("missed") or []
+        if start_ms <= int(item.get("signal_ms") or 0) <= end_ms
+    ]
+    return _pack(
+        trades,
+        missed,
+        factor=summary.get("factor", 0.0),
+        slippage_ticks=summary.get("slippage_ticks", 0),
+        fee_rate=summary.get("fee_rate", FEE_RATE),
+        fill=summary.get("fill") or "",
+    )
 
 
 def notify_gate(summary: dict, *, min_sample: int = 50, min_hit: float = 0.45, min_rr: float = 1.3) -> bool:
@@ -263,7 +454,7 @@ def render_report(rows: list[dict], *, start: str, end: str, bars: int) -> str:
         "# 盘面情景计划回测",
         "",
         f"- 数据：15m 收盘逐根调用同一套 `analyze`，区间 {start} 至 {end}，15m 共 {bars} 根。",
-        "- 进场：计划状态变成「可进场」，且价格不在区间中间 50%（那里的结论是不开单），也不在数据日历窗口里。",
+        "- 进场：计划状态变成「可进场」，且价格不在区间中间 50%（那里的结论是不开单），也不在数据日历窗口里。固定进场价被后续 K 线碰到才算成交；碰不到、计划过期，不计入。",
         "- 命中：先到 T1 算命中，先到止损算失败，24 小时都没到算无效、不进分母。同一根 K 同时碰到止损和目标，按止损。",
         "- 盈亏：到 T1 平一半，剩下的一半看到 T2、止损或 24 小时收盘。盈亏比用扣费后的价格盈亏除以计划止损距离。",
         "- 费用：每一笔扣往返 taker 手续费 0.05%×2。滑点版在进场和出场各再坏 1 个 tick（ETH 0.01）。",
