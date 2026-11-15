@@ -10,6 +10,7 @@ from supere.board.risk import assess
 from supere.board.sentiment import aligned_oi, crowding, funding_heat, quadrant, taker_pressure, volume_spike
 from supere.board.settings import AnalysisConfig
 from supere.board.trend import daily_rsi_tag, frame_view, macd_fading, synthesize
+from supere.intervals import INTERVAL_MS
 from supere.timeutil import format_utc8
 
 DISCLAIMER = "概率判断，仅供参考，不构成投资建议。"
@@ -231,6 +232,46 @@ def _chase(side: str | None, levels: dict, bars: list[dict]) -> bool:
     return False
 
 
+def _basis(packs: dict) -> dict:
+    """Clock of the closed 15m bar the narrative actually used. Display only."""
+    empty = {
+        "frame": "15m",
+        "close_ms": None,
+        "close_utc8": None,
+        "next_close_ms": None,
+        "next_close_utc8": None,
+    }
+    bars = packs["15m"]["bars"] if packs.get("15m") else []
+    if not bars:
+        return empty
+    close_ms = int(bars[-1]["close_time"])
+    step = INTERVAL_MS["15m"]
+    # Binance close_time is 1 ms before the next open, so the candle is quoted on that boundary.
+    if (close_ms + 1) % step == 0:
+        boundary = close_ms + 1
+    else:
+        boundary = close_ms
+    next_boundary = boundary + step
+    return {
+        "frame": "15m",
+        "close_ms": close_ms,
+        "close_utc8": format_utc8(boundary, "%H:%M:%S"),
+        "next_close_ms": next_boundary - 1,
+        "next_close_utc8": format_utc8(next_boundary, "%H:%M"),
+    }
+
+
+def _oi_view(snapshot: dict) -> dict:
+    oi = snapshot.get("oi") or {}
+    return {
+        "status": oi.get("status") or "missing",
+        "value": oi.get("value"),
+        "label": oi.get("label") or "",
+        "utc8": oi.get("utc8"),
+        "source": oi.get("source") or "",
+    }
+
+
 def _conclusion(trend: dict, rng: dict | None, chase: bool, side: str | None) -> dict:
     parts = []
     if trend["direction"] == "未获取":
@@ -359,6 +400,9 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
         "as_of_utc8": snapshot.get("now_utc8") or format_utc8(int(snapshot.get("now_ms") or 0)),
         "price": price_block,
         "ticker": snapshot.get("ticker"),
+        "basis": _basis(packs),
+        "funding": _funding_line(snapshot, analysis),
+        "oi": _oi_view(snapshot),
         "crosscheck": cross,
         "limit": snapshot.get("limit") or {"active": False, "message": ""},
         "trend": trend,

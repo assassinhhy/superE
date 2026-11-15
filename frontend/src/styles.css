@@ -65,6 +65,9 @@ a { color: var(--brass); }
 .side-tabs { display: flex; align-items: center; gap: 0.35rem; margin-bottom: 0.45rem; }
 .side-clock { margin-left: auto; color: var(--muted); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
 .board-alert { margin: 0 0 0.4rem; padding: 0.3rem 0.4rem; background: #3a2420; color: var(--down); }
+.board-stale { margin: 0 0 0.4rem; padding: 0.3rem 0.4rem; background: #3a3218; color: var(--warn); }
+.board-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.15rem 0.4rem; }
+.board-fresh { color: var(--muted); font-size: 0.68rem; font-weight: 400; letter-spacing: 0; line-height: 1.35; }
 .board-conclusion { margin: 0.15rem 0; line-height: 1.45; }
 .board-list { margin: 0; padding-left: 1rem; font-size: 0.78rem; }
 .board-list li { margin: 0.15rem 0; }
