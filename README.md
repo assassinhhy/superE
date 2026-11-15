@@ -114,13 +114,47 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_launch_returns
 .venv\Scripts\python.exe -m supere board
 ```
 
-它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。三个月回测：
+它听 `127.0.0.1:8770`。行情域名默认 `https://www.binance.com`，写在 `analysis.toml` 的 `[board.endpoints]`，本机用 `analysis.local.toml` 覆盖。启动脚本会顺带拉起它；停不掉也不影响 8766、8767、8769。Windows 系统通知默认关着。
+
+每条情景计划带上这根 15m 收线的时刻和失效时刻（UTC+8），例如「21:45 生成 · 有效至 22:45」。`valid_bars_15m = 4` 就是 1 小时。`/api/board` 的每条计划上有 `entry`、`validity`、`generated_ms`、`expires_ms`。进场价现在是一个固定价，区间改成小字：
+
+- 顺势回踩：取区间里离关键位更近的一端。现价区间是关键位 ± band，两端一样远，空单取上沿、多单取下沿（止损那一侧）。
+- 破位：关键位 ± `breakout_entry_atr`（默认 0.1）× ATR15m，顺着方向。
+- 逆势扫止损：区间中点。
+- 再按 `plans.tick`（ETHUSDT 为 0.01）取整。止损价仍在区间外侧，止损距离和 T1/T2 的 R 用这个固定价重算。
+
+计划记在 `data\board\plan_journal.sqlite`（WAL，不写 `superE.sqlite`）。同一根 15m、同一个计划只留一行，10 秒轮询不会重复插入。启动时会把还没出结果的计划用 1m K 线补上（没有 1m 就用 15m）：成交与否、成交时间、先到 T1/T2/止损、各自时间、到期未成交、MFE/MAE，以及扣过 taker 0.05%×2 和 maker 0.02%×2 的 R。已有数据目录只会补列，不删旧行。
+
+```
+GET /api/board/plans?start=2026-11-15 18:00&end=2026-11-15 22:00&limit=200
+GET /api/board/plans.csv?start=2026-11-15&end=2026-11-15
+```
+
+`start` / `end` 是 UTC+8 的 `YYYY-MM-DD HH:MM`，也可以直接给毫秒。只写日期时，`end` 含当天。界面上「历史计划」可折叠，里面有每条的结果和「导出 CSV」。
+
+固定进场的回测对比（b=0.35，碰到固定价才成交；旧规则是区间内用收盘、否则用中点）：
+
+```bat
+python scripts\board_backtest.py --compare --end "2026-11-15 18:00"
+```
+
+三个月扫止损系数的回测仍是：
 
 ```bat
 python scripts\board_backtest.py --download --start 2026-08-16 --end 2026-11-13 --out board-backtest.md
 ```
 
-家里如果拉不到 data.binance.vision，就用 `--fixture` 指向本机导出的 CSV 目录。说明写在脚本开头。
+K 线优先走 `https://www.binance.com/fapi/v1/klines`（`fapi.binance.com` 在部分网络会 451）。失败再退回 data.binance.vision。家里如果两边都拉不到，就用 `--fixture` 指向本机导出的 CSV 目录。说明写在脚本开头。
+
+只更新盘面时，拉代码、重建前端，然后只重启 8770，不要动 8766 / 8767 / 8769：
+
+```bat
+git pull
+cd frontend
+pnpm build
+cd ..
+.venv\Scripts\python.exe -m supere detach board
+```
 
 启动脚本会拉起三个进程：
 

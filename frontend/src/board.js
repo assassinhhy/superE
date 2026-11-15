@@ -137,6 +137,57 @@ export function boardFreshLine(view, fetchedAt) {
   return `更新于 ${boardClock(view, fetchedAt)} · 依据 15m 收线 ${close} · 下次重算 ${next}`;
 }
 
+export function planValidity(plan) {
+  if (!plan) return "";
+  if (plan.validity) return plan.validity;
+  if (plan.generated_utc8 && plan.expires_utc8) {
+    return `${String(plan.generated_utc8).slice(-5)} 生成 · 有效至 ${String(plan.expires_utc8).slice(-5)}`;
+  }
+  return "";
+}
+
+function feeSuffix(row) {
+  const taker = Number(row?.r_taker);
+  const maker = Number(row?.r_maker);
+  if (!Number.isFinite(taker)) return "";
+  const makerPart = Number.isFinite(maker) ? ` / maker ${maker.toFixed(2)}` : "";
+  return ` · 费后 R taker ${taker.toFixed(2)}${makerPart}`;
+}
+
+export function planOutcomeLine(row) {
+  if (!row || row.outcome == null || row.outcome === "pending") return "未结算";
+  if (row.outcome === "skipped") return "非交易";
+  if (row.expired_unfilled || row.outcome === "expired") return "到期未成交";
+  let path = "持仓中";
+  if (row.exit_reason === "t2") path = "先到 T1，随后 T2";
+  else if (row.exit_reason === "t1_stop") path = "先到 T1，随后止损";
+  else if (row.exit_reason === "t1_timeout") path = "先到 T1，随后到期";
+  else if (row.exit_reason === "stop" || row.first_hit === "stop") path = "先到止损";
+  else if (row.exit_reason === "t1" || row.first_hit === "t1") path = "先到 T1";
+  else if (row.outcome === "timeout" || row.exit_reason === "timeout") path = "24h 未触及";
+  const when = row.fill_utc8 ? `${String(row.fill_utc8).slice(-5)} ` : "";
+  return `已成交 ${when}· ${path}${feeSuffix(row)}`;
+}
+
+export function planHistoryQuery(range = {}) {
+  const search = new URLSearchParams();
+  if (range.start) search.set("start", range.start);
+  if (range.end) search.set("end", range.end);
+  if (range.limit != null) search.set("limit", String(range.limit));
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
+
+export function planHistoryExportURL(range = {}) {
+  return `${BOARD_ORIGIN}/api/board/plans.csv${planHistoryQuery(range)}`;
+}
+
+export async function loadPlanHistory(range = {}, { fetchImpl = globalThis.fetch } = {}) {
+  const response = await fetchImpl(`${BOARD_ORIGIN}/api/board/plans${planHistoryQuery({ limit: 100, ...range })}`);
+  if (!response.ok) throw new Error(String(response.status));
+  return response.json();
+}
+
 /** Seconds since the last successful pull once the gap is past `limit`. Null while still fresh. */
 export function boardStaleSeconds(anchor, now, limit = BOARD_STALE_MS) {
   if (!Number.isFinite(anchor) || !Number.isFinite(now)) return null;

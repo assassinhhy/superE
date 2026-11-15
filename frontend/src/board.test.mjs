@@ -12,7 +12,11 @@ import {
   boardStaleSeconds,
   bumpLoss,
   collectBoardEvents,
+  loadPlanHistory,
   lossState,
+  planHistoryExportURL,
+  planOutcomeLine,
+  planValidity,
 } from "./board.js";
 import { wantsSystemNotice } from "./notify.js";
 
@@ -94,6 +98,53 @@ test("the board panel prints the update clock and the stale banner", () => {
   assert.match(panel, /合约情绪 <span class="board-fresh">\{\{ freshLine \}\}<\/span>/);
   assert.match(panel, /情景计划 <span class="board-fresh">\{\{ freshLine \}\}<\/span>/);
   assert.match(panel, /实时 最新价/);
+  assert.match(panel, /进场 \{\{ px\(plan\.entry\) \}\}/);
+  assert.match(panel, /区间 \{\{ px\(plan\.entry_low\) \}\}–\{\{ px\(plan\.entry_high\) \}\}/);
+  assert.match(panel, /planValidity\(plan\)/);
+  assert.match(panel, /历史计划/);
+  assert.match(panel, /导出 CSV/);
+  assert.match(panel, /planOutcomeLine\(row\)/);
+});
+
+test("each plan carries the 15m close it was built on and the hour it expires", () => {
+  assert.equal(planValidity({ validity: "21:45 生成 · 有效至 22:45" }), "21:45 生成 · 有效至 22:45");
+  assert.equal(
+    planValidity({ generated_utc8: "2026-11-15 21:45", expires_utc8: "2026-11-15 22:45" }),
+    "21:45 生成 · 有效至 22:45",
+  );
+});
+
+test("history lines name the outcome and the export url stays on the board", () => {
+  assert.equal(planOutcomeLine({ outcome: "pending" }), "未结算");
+  assert.equal(planOutcomeLine({ outcome: "expired", expired_unfilled: 1 }), "到期未成交");
+  assert.equal(
+    planOutcomeLine({
+      outcome: "resolved",
+      filled: 1,
+      fill_utc8: "2026-11-15 21:51",
+      exit_reason: "stop",
+      first_hit: "stop",
+      r_taker: -1.05,
+      r_maker: -1.02,
+    }),
+    "已成交 21:51 · 先到止损 · 费后 R taker -1.05 / maker -1.02",
+  );
+  assert.equal(planHistoryExportURL({ start: "2026-11-13 18:00" }),
+    "http://127.0.0.1:8770/api/board/plans.csv?start=2026-11-13+18%3A00");
+});
+
+test("the history loader asks the board for one page", async () => {
+  const calls = [];
+  const payload = await loadPlanHistory({ start: "2026-11-15 00:00" }, {
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, json: async () => ({ plans: [{ plan_id: "a" }], count: 1 }) };
+    },
+  });
+  assert.equal(payload.count, 1);
+  assert.match(calls[0], /^http:\/\/127\.0\.0\.1:8770\/api\/board\/plans\?/);
+  assert.match(calls[0], /start=2026-11-15/);
+  assert.match(calls[0], /limit=100/);
 });
 
 test("the loss count resets at UTC+8 midnight", () => {

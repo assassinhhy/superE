@@ -7,7 +7,11 @@ import {
   bumpLoss,
   loadCalc,
   loadLoss,
+  loadPlanHistory,
   lossState,
+  planHistoryExportURL,
+  planOutcomeLine,
+  planValidity,
   saveCalc,
   saveLoss,
 } from "../board.js";
@@ -22,6 +26,9 @@ const props = defineProps({
 const emit = defineEmits(["focus"]);
 
 const calcOpen = ref(false);
+const historyOpen = ref(false);
+const history = ref([]);
+const historyError = ref("");
 const calc = ref(loadCalc());
 const loss = ref(loadLoss());
 const now = ref(Date.now());
@@ -58,9 +65,34 @@ function px(value) {
   return value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toFixed(2);
 }
 
+const exportHref = computed(() => planHistoryExportURL());
+
+async function refreshHistory() {
+  try {
+    const payload = await loadPlanHistory();
+    history.value = payload.plans || [];
+    historyError.value = "";
+  } catch {
+    historyError.value = "历史计划未取到";
+  }
+}
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value;
+  if (historyOpen.value) refreshHistory();
+}
+
+watch(
+  () => props.view?.basis?.boundary_ms,
+  () => {
+    if (historyOpen.value) refreshHistory();
+  },
+);
+
 function planCalc(plan) {
   if (!plan || plan.stop == null) return null;
-  const entry = (Number(plan.entry_low) + Number(plan.entry_high)) / 2;
+  const quoted = Number(plan.entry);
+  const entry = Number.isFinite(quoted) ? quoted : (Number(plan.entry_low) + Number(plan.entry_high)) / 2;
   return estimatePosition({
     entry,
     stop: Number(plan.stop),
@@ -194,7 +226,7 @@ function levelText(levels) {
       <p class="fine">支撑 {{ levelText(view.levels?.support) || "—" }}</p>
 
       <h2 class="board-head">情景计划 <span class="board-fresh">{{ freshLine }}</span></h2>
-      <p class="fine">{{ view.plans_meta?.generated_utc8 }} 生成，{{ view.plans_meta?.valid_bars }} 根 15m 内有效</p>
+      <p class="fine">{{ view.plans_meta?.validity || ((view.plans_meta?.generated_utc8 || "—") + " 生成，" + view.plans_meta?.valid_bars + " 根 15m 内有效") }}</p>
       <p v-if="view.plans_meta?.paused" class="board-alert">{{ view.plans_meta.pause_reason || "情景计划暂停" }}</p>
       <article v-for="(plan, index) in view.plans || []" :key="plan.id" class="board-plan">
         <p>
@@ -202,11 +234,15 @@ function levelText(levels) {
           <span :class="statusClass(plan.status)">{{ plan.status }}</span>
           <button v-if="plan.id !== 'flip'" type="button" @click="emit('focus', plan.id)">图上看</button>
         </p>
-        <p v-if="plan.id !== 'flip'" class="fine">
-          进场 {{ px(plan.entry_low) }}–{{ px(plan.entry_high) }}
-          止损 {{ px(plan.stop) }}
-          <span v-for="(target, targetIndex) in plan.targets" :key="target"> T{{ targetIndex + 1 }} {{ px(target) }}</span>
+        <p v-if="plan.id !== 'flip'" class="board-entry">
+          进场 {{ px(plan.entry) }}
+          <span class="fine">
+            止损 {{ px(plan.stop) }}
+            <span v-for="(target, targetIndex) in plan.targets" :key="target"> T{{ targetIndex + 1 }} {{ px(target) }}</span>
+          </span>
         </p>
+        <p v-if="plan.id !== 'flip'" class="fine">区间 {{ px(plan.entry_low) }}–{{ px(plan.entry_high) }}</p>
+        <p class="fine">{{ planValidity(plan) }}</p>
         <p v-if="plan.note" class="fine">{{ plan.note }}</p>
         <p v-if="planCalc(plan)" class="fine" :class="{ bad: planCalc(plan).warnings.length }">
           名义 {{ money(planCalc(plan).notional) }} U · 保证金 {{ money(planCalc(plan).margin) }} U
@@ -218,6 +254,26 @@ function levelText(levels) {
           <span v-for="warning in planCalc(plan).warnings" :key="warning" class="bad">{{ warning }}</span>
         </p>
       </article>
+
+      <h2 class="board-head">
+        <button type="button" @click="toggleHistory">历史计划</button>
+        <a v-if="historyOpen" class="fine" :href="exportHref">导出 CSV</a>
+      </h2>
+      <div v-if="historyOpen" class="board-history">
+        <p v-if="historyError" class="board-alert">{{ historyError }}</p>
+        <p v-else-if="!history.length" class="wait">还没有记录。</p>
+        <article v-for="row in history" :key="row.plan_id" class="board-plan">
+          <p>
+            <strong>{{ row.generated_utc8 }} {{ row.title }}</strong>
+            {{ row.direction === "short" ? "空" : row.direction === "long" ? "多" : "" }}
+          </p>
+          <p v-if="row.entry != null" class="fine">
+            进场 {{ px(row.entry) }}
+            <span v-if="row.entry_low != null">区间 {{ px(row.entry_low) }}–{{ px(row.entry_high) }}</span>
+          </p>
+          <p class="fine">{{ planOutcomeLine(row) }}</p>
+        </article>
+      </div>
 
       <button type="button" @click="calcOpen = !calcOpen">计算器</button>
       <div v-if="calcOpen" class="board-calc">

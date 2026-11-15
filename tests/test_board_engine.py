@@ -315,6 +315,12 @@ def test_replay_20261114_1109_matches_the_call():
     assert result["basis"]["close_utc8"] == "11:00:00"
     assert result["basis"]["next_close_utc8"] == "11:15"
     assert result["basis"]["next_close_ms"] - result["basis"]["close_ms"] == 900_000
+    assert result["plans_meta"]["validity"] == "11:00 生成 · 有效至 12:00"
+    assert result["plans_meta"]["basis_close_ms"] == result["basis"]["boundary_ms"]
+    for plan in result["plans"]:
+        assert plan["validity"] == "11:00 生成 · 有效至 12:00"
+        assert plan["entry"] is not None
+        assert "entry_rule" in plan
 
 
 def test_replay_20261114_1351_is_a_middle_range():

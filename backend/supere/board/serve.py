@@ -18,10 +18,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from supere.board.engine import analyze
 from supere.board.fetcher import BoardFetcher
+from supere.board.journal import PlanJournal, journal_path, parse_bound
 from supere.board.risk import load_calendar
 from supere.board.settings import AnalysisConfig, load_analysis
 from supere.config import apply_no_proxy, load_config, proxy_or_none
@@ -47,11 +48,36 @@ def create_app(
     owns_fetcher = fetcher is None and frozen is None
     if fetcher is None and frozen is None:
         fetcher = BoardFetcher(analysis, root, proxy=proxy, clock=clock)
+    journal = PlanJournal(journal_path(root))
+    symbol = analysis.board.symbol
+
+    def load_bars(interval: str, start_ms: int, end_ms: int) -> list[dict]:
+        if fetcher is None:
+            return []
+        bars = fetcher.reader.klines_between(symbol, interval, start_ms, end_ms)
+        if bars:
+            return bars
+        return fetcher.cache.klines_between(symbol, interval, start_ms, end_ms)
+
+    def resolve_now(now_ms: int | None = None) -> None:
+        moment = now_ms
+        if moment is None and fetcher is not None:
+            moment = fetcher.now()
+        if moment is None:
+            return
+        try:
+            journal.resolve_pending(load_bars, int(moment))
+        except Exception:
+            log.exception("计划结果回填失败")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         stop = threading.Event()
         thread = None
+        try:
+            resolve_now()
+        except Exception:
+            log.exception("启动时回填计划结果失败")
         if schedule and fetcher is not None:
             def loop() -> None:
                 while not stop.wait(1.0):
@@ -68,11 +94,13 @@ def create_app(
             stop.set()
             if thread is not None:
                 thread.join(timeout=2)
-            if owns_fetcher:
+            if owns_fetcher and fetcher is not None:
                 fetcher.close()
+            journal.close()
 
     app = FastAPI(title="superE board", default_response_class=UTF8JSONResponse, lifespan=lifespan)
     app.state.fetcher = fetcher
+    app.state.journal = journal
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"http://(127\.0\.0\.1|localhost)(:\d+)?",
@@ -90,13 +118,53 @@ def create_app(
             return {"frozen": True, "as_of_utc8": frozen.get("as_of_utc8")}
         return fetcher.view()
 
+    def _bounds(start: str | None, end: str | None) -> tuple[int | None, int | None]:
+        return parse_bound(start), parse_bound(end, end=True)
+
+    @app.get("/api/board/plans")
+    def board_plans(start: str | None = None, end: str | None = None, limit: int = 200):
+        try:
+            start_ms, end_ms = _bounds(start, end)
+        except ValueError:
+            return UTF8JSONResponse(
+                {"error": "时间格式应为 UTC+8 的 YYYY-MM-DD HH:MM 或毫秒"},
+                status_code=400,
+            )
+        resolve_now()
+        rows = journal.list_plans(start_ms=start_ms, end_ms=end_ms, limit=limit)
+        return {"plans": rows, "count": len(rows)}
+
+    @app.get("/api/board/plans.csv")
+    def board_plans_csv(start: str | None = None, end: str | None = None):
+        try:
+            start_ms, end_ms = _bounds(start, end)
+        except ValueError:
+            return UTF8JSONResponse(
+                {"error": "时间格式应为 UTC+8 的 YYYY-MM-DD HH:MM 或毫秒"},
+                status_code=400,
+            )
+        resolve_now()
+        rows = journal.list_plans(start_ms=start_ms, end_ms=end_ms, limit=5000)
+        body = "\ufeff" + journal.to_csv(rows)
+        return Response(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=board-plans.csv"},
+        )
+
     @app.get("/api/board")
     def board():
         if frozen is not None:
             return frozen
         snap = fetcher.view()
         snap["calendar"] = load_calendar(root / "board" / "calendar.csv")
-        return analyze(snap, analysis)
+        result = analyze(snap, analysis)
+        try:
+            journal.record_board(result, analysis)
+        except Exception:
+            log.exception("计划日志写入失败")
+        resolve_now(result.get("as_of"))
+        return result
 
     @app.get("/api/board/config")
     def board_config():

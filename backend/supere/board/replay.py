@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import csv
 from pathlib import Path
 
@@ -13,6 +14,16 @@ from supere.intervals import INTERVAL_MS
 from supere.timeutil import format_utc8
 
 INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
+_TIME_INDEX: dict[tuple[int, str], list[int]] = {}
+
+
+def _times(rows: list[dict], field: str) -> list[int]:
+    key = (id(rows), field)
+    cached = _TIME_INDEX.get(key)
+    if cached is None or len(cached) != len(rows):
+        cached = [int(row[field]) for row in rows]
+        _TIME_INDEX[key] = cached
+    return cached
 
 
 def _num(value):
@@ -79,7 +90,9 @@ def snapshot_at(fixture: dict, at_ms: int, analysis: AnalysisConfig) -> dict:
     for interval, bars in fixture["frames"].items():
         if interval == "1m":
             continue
-        closed = [bar for bar in bars if bar["close_time"] <= at_ms][-limit:]
+        # Bars are ordered by open time, and close time moves with them.
+        cut = bisect.bisect_right(_times(bars, "close_time"), at_ms)
+        closed = bars[max(0, cut - limit) : cut]
         latest = closed[-1]["close_time"] if closed else None
         status = kline_status(latest, at_ms, INTERVAL_MS[interval], grace)
         klines[interval] = {
@@ -90,7 +103,8 @@ def snapshot_at(fixture: dict, at_ms: int, analysis: AnalysisConfig) -> dict:
             "label": "" if latest is None else format_utc8(latest, "%H:%M:%S"),
             "bars": closed if status == "ok" else closed,
         }
-    metrics = [row for row in fixture["metrics"] if row["known_at"] <= at_ms][-limit:]
+    metric_cut = bisect.bisect_right(_times(fixture["metrics"], "known_at"), at_ms)
+    metrics = fixture["metrics"][max(0, metric_cut - limit) : metric_cut]
     if metrics:
         known = metrics[-1]["known_at"]
         status = "ok" if at_ms - known <= analysis.board.stale.metrics_minutes * 60_000 else "stale"
