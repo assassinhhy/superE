@@ -228,6 +228,32 @@ def test_backoff_sends_nothing_until_the_ban_lifts(tmp_path: Path):
     fetcher.close()
 
 
+def test_next_job_assembles_the_snapshot_once_per_poll(tmp_path: Path, monkeypatch):
+    import supere.board.fetcher as fetcher_module
+
+    calls: list[int] = []
+    real = fetcher_module.assemble
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fetcher_module, "assemble", counting)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("所有序列都新鲜时不应该发出请求")
+
+    _seed(tmp_path / "superE.sqlite", metric_ts=NOW - 300_000, kline_close=NOW - 1_000, funding_at=NOW)
+    fetcher = _fetcher(tmp_path, handler)
+    fetcher.last_oi = NOW
+    fetcher.last_okx = NOW
+    assert fetcher.poll_once() is None
+    # Before this change metrics, funding and klines each assembled their own
+    # snapshot, so one poll read the whole cache three times.
+    assert calls == [1]
+    fetcher.close()
+
+
 def test_fresh_metrics_do_not_call_futures_data(tmp_path: Path):
     calls = []
 

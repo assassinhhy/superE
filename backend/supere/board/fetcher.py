@@ -108,25 +108,23 @@ class BoardFetcher:
     def _next_job(self, now: int, banned: bool) -> str | None:
         gap = self.analysis.board.poll.oi_seconds * 1000
         if not banned:
-            if self._series_stale("metrics", now) and (self._metric_step or now - self.last_metrics >= gap):
+            # One snapshot decides every series: assembling three times here
+            # would read the whole cache and main database three times per poll.
+            snap = assemble(self.reader, self.cache, self.ban, self.analysis, now)
+            metrics_stale = snap["metrics"]["status"] != "ok"
+            funding_stale = snap["funding"]["status"] != "ok"
+            klines_stale = any(snap["klines"][interval]["status"] != "ok" for interval in BOARD_INTERVALS)
+            if metrics_stale and (self._metric_step or now - self.last_metrics >= gap):
                 return "metrics"
-            if self._series_stale("funding", now) and now - self.last_funding >= gap:
+            if funding_stale and now - self.last_funding >= gap:
                 return "funding"
-            if self._series_stale("klines", now):
+            if klines_stale:
                 return "klines"
             if now - self.last_oi >= gap:
                 return "oi"
         if now - self.last_okx >= self.analysis.board.poll.okx_seconds * 1000:
             return "okx"
         return None
-
-    def _series_stale(self, kind: str, now: int) -> bool:
-        snap = assemble(self.reader, self.cache, self.ban, self.analysis, now)
-        if kind == "metrics":
-            return snap["metrics"]["status"] != "ok"
-        if kind == "funding":
-            return snap["funding"]["status"] != "ok"
-        return any(snap["klines"][interval]["status"] != "ok" for interval in BOARD_INTERVALS)
 
     def _run(self, job: str, now: int) -> None:
         if job == "metrics":

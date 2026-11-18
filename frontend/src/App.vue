@@ -121,6 +121,7 @@ onUnmounted(() => {
           :error="board.error"
           :fetched-at="board.fetchedAt"
           :since="board.since"
+          :focus-plan="focusPlan"
           @focus="focusPlan = $event"
         />
         <SidePanel

@@ -78,6 +78,9 @@ _ADDED: dict[str, str] = {
     "bar_interval": "TEXT",
     "resolved_at": "INTEGER",
     "detail_json": "TEXT",
+    # Review annotations, written through ``update_note`` only.
+    "followed": "INTEGER DEFAULT 0",
+    "user_note": "TEXT",
 }
 
 _CREATE = """
@@ -130,7 +133,9 @@ CREATE TABLE IF NOT EXISTS plan_journal (
   r_maker REAL,
   bar_interval TEXT,
   resolved_at INTEGER,
-  detail_json TEXT
+  detail_json TEXT,
+  followed INTEGER DEFAULT 0,
+  user_note TEXT
 );
 """
 
@@ -183,7 +188,12 @@ CSV_FIELDS = [
     "r_maker",
     "bar_interval",
     "resolved_at",
+    "followed",
+    "user_note",
 ]
+
+# Everything the JSON API exposes. ``detail_json`` stays out of the CSV export.
+_PUBLIC_FIELDS = [*CSV_FIELDS, "detail_json"]
 
 _OUTCOME_FIELDS = (
     "outcome",
@@ -464,17 +474,104 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
 
 def _public_row(row: sqlite3.Row) -> dict:
-    item = {key: row[key] for key in row.keys()}
+    available = set(row.keys())
+    item = {key: row[key] for key in _PUBLIC_FIELDS if key in available}
     raw = item.get("triggers")
     if isinstance(raw, str) and raw:
         try:
             item["triggers"] = json.loads(raw)
         except json.JSONDecodeError:
             pass
-    for key in ("filled", "expired_unfilled"):
+    for key in ("filled", "expired_unfilled", "followed"):
         if item.get(key) is not None:
             item[key] = int(item[key])
     return item
+
+
+def _filter_clauses(
+    start_ms: int | None,
+    end_ms: int | None,
+    status: str | None,
+    kind: str | None,
+    followed: bool | None,
+) -> tuple[list[str], list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if start_ms is not None:
+        clauses.append("generated_ms>=?")
+        params.append(int(start_ms))
+    if end_ms is not None:
+        clauses.append("generated_ms<=?")
+        params.append(int(end_ms))
+    if status is not None:
+        clauses.append("status=?")
+        params.append(str(status))
+    if kind is not None:
+        clauses.append("kind=?")
+        params.append(str(kind))
+    if followed is not None:
+        clauses.append("followed=?")
+        params.append(1 if followed else 0)
+    return clauses, params
+
+
+def _ratio(numerator: float, denominator: int) -> float:
+    if not denominator:
+        return 0.0
+    return round(float(numerator) / int(denominator), 4) + 0.0
+
+
+def _rounded(value: float) -> float:
+    # ``+ 0.0`` normalises a negative zero so JSON never renders ``-0.0``.
+    return round(float(value), 4) + 0.0
+
+
+def _stats(rows: list[dict]) -> dict:
+    """Counts and R multiples for one set of plan rows.
+
+    ``fill_rate`` excludes skipped plans (翻转 has no entry to fill), and
+    ``win_rate`` divides positive ``r_taker`` by settled filled plans
+    (``resolved``/``timeout`` with an R value).
+    """
+    total = len(rows)
+    filled = sum(1 for row in rows if int(row.get("filled") or 0))
+    expired = sum(
+        1
+        for row in rows
+        if row.get("outcome") == "expired" or int(row.get("expired_unfilled") or 0)
+    )
+    open_count = sum(1 for row in rows if row.get("outcome") == "open")
+    pending = sum(1 for row in rows if row.get("outcome") == "pending")
+    skipped = sum(1 for row in rows if row.get("outcome") == "skipped")
+    settled = [row for row in rows if row.get("outcome") in ("resolved", "timeout")]
+    taker = [float(row["r_taker"]) for row in settled if row.get("r_taker") is not None]
+    maker = [float(row["r_maker"]) for row in settled if row.get("r_maker") is not None]
+    wins = sum(1 for value in taker if value > 0)
+    return {
+        "total": total,
+        "filled": filled,
+        "expired": expired,
+        "open": open_count,
+        "pending": pending,
+        "resolved": len(settled),
+        "skipped": skipped,
+        "fill_rate": _ratio(filled, total - skipped),
+        "win_rate": _ratio(wins, len(taker)),
+        "total_r_taker": _rounded(sum(taker)),
+        "avg_r_taker": _ratio(sum(taker), len(taker)),
+        "total_r_maker": _rounded(sum(maker)),
+        "avg_r_maker": _ratio(sum(maker), len(maker)),
+    }
+
+
+def _grouped(rows: list[dict], key: str) -> dict[str, dict]:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        name = row.get(key)
+        if not name:
+            continue
+        groups.setdefault(str(name), []).append(row)
+    return {name: _stats(group) for name, group in groups.items()}
 
 
 class PlanJournal:
@@ -617,15 +714,17 @@ class PlanJournal:
             (*usable.values(), plan_id),
         )
 
-    def list_plans(self, *, start_ms: int | None = None, end_ms: int | None = None, limit: int = 200) -> list[dict]:
-        clauses: list[str] = []
-        params: list[object] = []
-        if start_ms is not None:
-            clauses.append("generated_ms>=?")
-            params.append(int(start_ms))
-        if end_ms is not None:
-            clauses.append("generated_ms<=?")
-            params.append(int(end_ms))
+    def list_plans(
+        self,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 200,
+        status: str | None = None,
+        kind: str | None = None,
+        followed: bool | None = None,
+    ) -> list[dict]:
+        clauses, params = _filter_clauses(start_ms, end_ms, status, kind, followed)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(max(1, min(int(limit), 5000)))
         with self._lock:
@@ -634,6 +733,70 @@ class PlanJournal:
                 params,
             ).fetchall()
         return [_public_row(row) for row in rows]
+
+    def summarize_plans(
+        self,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        followed: bool | None = None,
+    ) -> dict:
+        """Performance summary over every matching row (no limit)."""
+        clauses, params = _filter_clauses(start_ms, end_ms, status, kind, followed)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            rows = [
+                dict(row)
+                for row in self.conn.execute(
+                    """
+                    SELECT kind, status, outcome, filled, expired_unfilled, r_taker, r_maker
+                    FROM plan_journal
+                    """ + where,
+                    params,
+                ).fetchall()
+            ]
+        summary = _stats(rows)
+        summary["by_kind"] = _grouped(rows, "kind")
+        summary["by_status"] = _grouped(rows, "status")
+        return summary
+
+    def update_note(
+        self,
+        plan_id: str,
+        *,
+        followed: bool | None = None,
+        note: str | None = None,
+    ) -> dict | None:
+        """Set the follow flag and review note on one plan. ``None`` = no such row.
+
+        A whitespace-only note clears the column back to NULL.
+        """
+        assignments: list[str] = []
+        params: list[object] = []
+        if followed is not None:
+            assignments.append("followed=?")
+            params.append(1 if followed else 0)
+        if note is not None:
+            text = str(note).strip()
+            assignments.append("user_note=?")
+            params.append(text or None)
+        with self._lock:
+            exists = self.conn.execute(
+                "SELECT 1 FROM plan_journal WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            if assignments:
+                self.conn.execute(
+                    f"UPDATE plan_journal SET {', '.join(assignments)} WHERE plan_id=?",
+                    (*params, plan_id),
+                )
+                self.conn.commit()
+            row = self.conn.execute(
+                "SELECT * FROM plan_journal WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+        return _public_row(row)
 
     def to_csv(self, rows: list[dict]) -> str:
         buffer = io.StringIO()

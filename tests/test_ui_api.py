@@ -264,10 +264,15 @@ def test_ui_does_not_invent_signals():
     assert "第二阶段" in text
     assert "0.58" not in text
     assert "偏涨" not in text
-    # 允许的写请求只有：用户点「预测」时的 POST /api/predict，以及手动刷新消息的
-    # POST /api/news/refresh。看盘本身不得发其它写请求或编造信号。
-    post_lines = [line.strip() for line in text.splitlines() if 'method: "POST"' in line]
-    assert post_lines, "预期存在点击预测触发的 POST"
-    allowed = ("/api/predict", "/api/news/refresh")
-    assert all(any(path in line for path in allowed) for line in post_lines), post_lines
+    # 允许的写请求只有：用户点「预测」时的 POST /api/predict、手动刷新消息的
+    # POST /api/news/refresh、以及盘面复盘备注 POST /api/board/plans/.../note。
+    lines = text.splitlines()
+    post_contexts = [
+        "\n".join(lines[max(0, idx - 2) : min(len(lines), idx + 3)])
+        for idx, line in enumerate(lines)
+        if 'method: "POST"' in line
+    ]
+    assert post_contexts, "预期存在点击预测触发的 POST"
+    allowed = ("/api/predict", "/api/news/refresh", "/api/board/plans/")
+    assert all(any(path in ctx for path in allowed) for ctx in post_contexts), post_contexts
     assert "/fapi/" not in text

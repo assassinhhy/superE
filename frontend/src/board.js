@@ -169,23 +169,126 @@ export function planOutcomeLine(row) {
   return `已成交 ${when}· ${path}${feeSuffix(row)}`;
 }
 
-export function planHistoryQuery(range = {}) {
+export function planQuery(range = {}) {
   const search = new URLSearchParams();
   if (range.start) search.set("start", range.start);
   if (range.end) search.set("end", range.end);
+  if (range.status) search.set("status", range.status);
+  if (range.kind) search.set("kind", range.kind);
+  if (range.followed != null && range.followed !== "") {
+    search.set("followed", range.followed ? "true" : "false");
+  }
   if (range.limit != null) search.set("limit", String(range.limit));
   const text = search.toString();
   return text ? `?${text}` : "";
 }
 
+export function planHistoryQuery(range = {}) {
+  return planQuery(range);
+}
+
+export const PLAN_SCOPES = [
+  { id: "all", label: "全部" },
+  { id: "ready", label: "仅可进场" },
+  { id: "followed", label: "仅已跟单" },
+];
+
+export const PLAN_KINDS = [
+  { id: "", label: "全部类型" },
+  { id: "顺势", label: "顺势" },
+  { id: "破位", label: "破位" },
+  { id: "逆势", label: "逆势" },
+];
+
+/** UI scope + kind -> the query parameters the board endpoints expect. */
+export function historyFilters(scope = "all", kind = "") {
+  const filters = {};
+  if (scope === "ready") filters.status = "可进场";
+  else if (scope === "followed") filters.followed = true;
+  if (kind) filters.kind = kind;
+  return filters;
+}
+
 export function planHistoryExportURL(range = {}) {
-  return `${BOARD_ORIGIN}/api/board/plans.csv${planHistoryQuery(range)}`;
+  return `${BOARD_ORIGIN}/api/board/plans.csv${planQuery(range)}`;
 }
 
 export async function loadPlanHistory(range = {}, { fetchImpl = globalThis.fetch } = {}) {
-  const response = await fetchImpl(`${BOARD_ORIGIN}/api/board/plans${planHistoryQuery({ limit: 100, ...range })}`);
+  const response = await fetchImpl(`${BOARD_ORIGIN}/api/board/plans${planQuery({ limit: 100, ...range })}`);
   if (!response.ok) throw new Error(String(response.status));
   return response.json();
+}
+
+export async function loadPlanStats(range = {}, { fetchImpl = globalThis.fetch } = {}) {
+  const response = await fetchImpl(`${BOARD_ORIGIN}/api/board/stats${planQuery(range)}`);
+  if (!response.ok) throw new Error(String(response.status));
+  return response.json();
+}
+
+/** Persist the follow flag and/or one-line review note. Returns the updated row. */
+export async function savePlanNote(planId, patch = {}, { fetchImpl = globalThis.fetch } = {}) {
+  const id = String(planId ?? "").trim();
+  if (!id) throw new Error("plan id required");
+  const body = {};
+  if (patch.followed !== undefined) body.followed = Boolean(patch.followed);
+  if (patch.note !== undefined) body.note = String(patch.note ?? "");
+  const response = await fetchImpl(
+    `${BOARD_ORIGIN}/api/board/plans/${encodeURIComponent(id)}/note`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!response.ok) throw new Error(String(response.status));
+  const payload = await response.json();
+  return payload?.plan ?? payload;
+}
+
+export function rText(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `${number >= 0 ? "+" : ""}${number.toFixed(digits)}`;
+}
+
+export function percentText(value, digits = 1) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `${(number * 100).toFixed(digits)}%`;
+}
+
+/** Compact, display-ready numbers for the performance bar. */
+export function statsSummary(stats) {
+  if (!stats) return null;
+  return {
+    fillRate: percentText(stats.fill_rate),
+    winRate: percentText(stats.win_rate),
+    totalTaker: rText(stats.total_r_taker),
+    totalMaker: rText(stats.total_r_maker),
+    avgTaker: rText(stats.avg_r_taker),
+    avgMaker: rText(stats.avg_r_maker),
+    filled: Number(stats.filled) || 0,
+    resolved: Number(stats.resolved) || 0,
+    total: Number(stats.total) || 0,
+  };
+}
+
+/** Horizontal guide levels for the focused plan: entry, stop, T1 and T2. */
+export function planGuideLevels(plan) {
+  if (!plan || plan.id === "flip") return [];
+  const levels = [];
+  const push = (price, label, tone) => {
+    if (price == null || price === "") return;
+    const value = Number(price);
+    if (!Number.isFinite(value)) return;
+    levels.push({ price: value, label, tone });
+  };
+  push(plan.entry, "进场", "entry");
+  push(plan.stop, "止损", "stop");
+  const targets = Array.isArray(plan.targets) ? plan.targets : [];
+  push(plan.t1 != null ? plan.t1 : targets[0], "T1", "target");
+  push(plan.t2 != null ? plan.t2 : targets[1], "T2", "target");
+  return levels;
 }
 
 /** Seconds since the last successful pull once the gap is past `limit`. Null while still fresh. */

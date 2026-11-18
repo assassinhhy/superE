@@ -2,18 +2,24 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { estimatePosition } from "../boardCalc.js";
 import {
+  PLAN_KINDS,
+  PLAN_SCOPES,
   boardFreshLine,
   boardStaleSeconds,
   bumpLoss,
+  historyFilters,
   loadCalc,
   loadLoss,
   loadPlanHistory,
+  loadPlanStats,
   lossState,
   planHistoryExportURL,
   planOutcomeLine,
   planValidity,
   saveCalc,
   saveLoss,
+  savePlanNote,
+  statsSummary,
 } from "../board.js";
 
 const props = defineProps({
@@ -22,6 +28,7 @@ const props = defineProps({
   error: { type: String, default: "" },
   fetchedAt: { default: null },
   since: { default: null },
+  focusPlan: { type: String, default: "" },
 });
 const emit = defineEmits(["focus"]);
 
@@ -29,6 +36,12 @@ const calcOpen = ref(false);
 const historyOpen = ref(false);
 const history = ref([]);
 const historyError = ref("");
+const stats = ref(null);
+const statsError = ref("");
+const scope = ref("all");
+const kind = ref("");
+const noteDrafts = ref({});
+const savingId = ref("");
 const calc = ref(loadCalc());
 const loss = ref(loadLoss());
 const now = ref(Date.now());
@@ -65,16 +78,38 @@ function px(value) {
   return value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toFixed(2);
 }
 
-const exportHref = computed(() => planHistoryExportURL());
+const activeFilters = computed(() => historyFilters(scope.value, kind.value));
+const statsLine = computed(() => statsSummary(stats.value));
+const exportHref = computed(() => planHistoryExportURL(activeFilters.value));
 
-async function refreshHistory() {
+function seedDrafts(rows) {
+  const next = {};
+  for (const row of rows) next[row.plan_id] = row.user_note || "";
+  noteDrafts.value = next;
+}
+
+async function refreshPlanRows() {
   try {
-    const payload = await loadPlanHistory();
+    const payload = await loadPlanHistory(activeFilters.value);
     history.value = payload.plans || [];
     historyError.value = "";
+    seedDrafts(history.value);
   } catch {
     historyError.value = "历史计划未取到";
   }
+}
+
+async function refreshStats() {
+  try {
+    stats.value = await loadPlanStats(activeFilters.value);
+    statsError.value = "";
+  } catch {
+    statsError.value = "绩效统计未取到";
+  }
+}
+
+async function refreshHistory() {
+  await Promise.all([refreshPlanRows(), refreshStats()]);
 }
 
 function toggleHistory() {
@@ -82,12 +117,53 @@ function toggleHistory() {
   if (historyOpen.value) refreshHistory();
 }
 
+watch([scope, kind], () => {
+  if (historyOpen.value) refreshHistory();
+});
+
 watch(
   () => props.view?.basis?.boundary_ms,
   () => {
     if (historyOpen.value) refreshHistory();
   },
 );
+
+async function setFollowed(row, followed) {
+  if (savingId.value) return;
+  savingId.value = row.plan_id;
+  try {
+    const saved = await savePlanNote(row.plan_id, { followed });
+    row.followed = saved?.followed ?? (followed ? 1 : 0);
+    if (scope.value === "followed" && !row.followed) {
+      history.value = history.value.filter((item) => item.plan_id !== row.plan_id);
+    }
+    await refreshStats();
+  } catch {
+    historyError.value = "跟单标记未保存";
+  } finally {
+    savingId.value = "";
+  }
+}
+
+async function saveRowNote(row) {
+  if (savingId.value) return;
+  savingId.value = row.plan_id;
+  try {
+    const text = noteDrafts.value[row.plan_id] ?? "";
+    const saved = await savePlanNote(row.plan_id, { note: text });
+    row.user_note = saved?.user_note ?? null;
+    noteDrafts.value[row.plan_id] = row.user_note || "";
+    historyError.value = "";
+  } catch {
+    historyError.value = "复盘备注未保存";
+  } finally {
+    savingId.value = "";
+  }
+}
+
+function focusPlanToggle(planId) {
+  emit("focus", props.focusPlan === planId ? "" : planId);
+}
 
 function planCalc(plan) {
   if (!plan || plan.stop == null) return null;
@@ -232,7 +308,9 @@ function levelText(levels) {
         <p>
           <strong>{{ index + 1 }}. {{ plan.title }}</strong>
           <span :class="statusClass(plan.status)">{{ plan.status }}</span>
-          <button v-if="plan.id !== 'flip'" type="button" @click="emit('focus', plan.id)">图上看</button>
+          <button v-if="plan.id !== 'flip'" type="button" @click="focusPlanToggle(plan.id)">
+            {{ focusPlan === plan.id ? "取消图看" : "图上看" }}
+          </button>
         </p>
         <p v-if="plan.id !== 'flip'" class="board-entry">
           进场 {{ px(plan.entry) }}
@@ -260,18 +338,67 @@ function levelText(levels) {
         <a v-if="historyOpen" class="fine" :href="exportHref">导出 CSV</a>
       </h2>
       <div v-if="historyOpen" class="board-history">
+        <div class="board-filters">
+          <button
+            v-for="item in PLAN_SCOPES"
+            :key="item.id"
+            type="button"
+            :class="{ on: scope === item.id }"
+            @click="scope = item.id"
+          >
+            {{ item.label }}
+          </button>
+          <select v-model="kind" aria-label="策略类型">
+            <option v-for="item in PLAN_KINDS" :key="item.id || 'all'" :value="item.id">
+              {{ item.label }}
+            </option>
+          </select>
+        </div>
+        <div v-if="statsLine" class="board-stats">
+          <span>成交率 {{ statsLine.fillRate }}</span>
+          <span>胜率 {{ statsLine.winRate }}</span>
+          <span>累计 R {{ statsLine.totalTaker }} <small>maker {{ statsLine.totalMaker }}</small></span>
+          <span>平均 R {{ statsLine.avgTaker }} <small>maker {{ statsLine.avgMaker }}</small></span>
+          <span class="board-meta">已成交 {{ statsLine.filled }} · 已结算 {{ statsLine.resolved }} / 共 {{ statsLine.total }}</span>
+        </div>
+        <p v-if="statsError" class="board-alert">{{ statsError }}</p>
         <p v-if="historyError" class="board-alert">{{ historyError }}</p>
         <p v-else-if="!history.length" class="wait">还没有记录。</p>
         <article v-for="row in history" :key="row.plan_id" class="board-plan">
           <p>
             <strong>{{ row.generated_utc8 }} {{ row.title }}</strong>
             {{ row.direction === "short" ? "空" : row.direction === "long" ? "多" : "" }}
+            <span v-if="row.kind" class="board-meta">{{ row.kind }}</span>
+            <label class="board-follow">
+              <input
+                type="checkbox"
+                :checked="Boolean(row.followed)"
+                :disabled="savingId === row.plan_id"
+                @change="setFollowed(row, $event.target.checked)"
+              />
+              已跟单
+            </label>
           </p>
           <p v-if="row.entry != null" class="fine">
             进场 {{ px(row.entry) }}
             <span v-if="row.entry_low != null">区间 {{ px(row.entry_low) }}–{{ px(row.entry_high) }}</span>
           </p>
           <p class="fine">{{ planOutcomeLine(row) }}</p>
+          <p class="board-note">
+            <input
+              v-model="noteDrafts[row.plan_id]"
+              type="text"
+              maxlength="200"
+              placeholder="一句复盘备注"
+            />
+            <button
+              type="button"
+              :disabled="savingId === row.plan_id"
+              @click="saveRowNote(row)"
+            >
+              保存备注
+            </button>
+          </p>
         </article>
       </div>
 

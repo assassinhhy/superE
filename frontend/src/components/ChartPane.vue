@@ -2,6 +2,7 @@
 import { dispose, init, registerIndicator } from "klinecharts";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../api.js";
+import { planGuideLevels } from "../board.js";
 import { BOARD_INTERVALS, registerBoardOverlays } from "../boardOverlays.js";
 import {
   BOARD_GROUP,
@@ -340,6 +341,21 @@ function paintBoard() {
         { timestamp: stamp, value: plan.entry_low },
       ],
       extendData: { ...plan, highlight: props.focusPlan === plan.id },
+    });
+  }
+  // The focused plan additionally gets labeled entry / stop / T1 / T2 lines.
+  // paintBoard clears the whole board group first, so switching or cancelling
+  // the focus updates or removes these guides automatically.
+  const focused = props.focusPlan
+    ? (view.plans || []).find((plan) => plan.id === props.focusPlan)
+    : null;
+  for (const level of planGuideLevels(focused)) {
+    chart.createOverlay({
+      name: "boardLevel",
+      groupId: BOARD_GROUP,
+      lock: true,
+      points: [{ timestamp: stamp, value: level.price }],
+      extendData: { ...level, lead: true, guide: true },
     });
   }
   if (props.focusPlan) chart.scrollToRealTime?.();

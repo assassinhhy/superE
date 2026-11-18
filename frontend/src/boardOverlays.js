@@ -4,6 +4,9 @@ import { registerOverlay } from "klinecharts";
 let registered = false;
 
 function levelColor(data) {
+  if (data?.tone === "stop") return "#d4654f";
+  if (data?.tone === "target") return "#7dba6a";
+  if (data?.tone === "entry") return "#d7a15f";
   if (data?.side === "support") return "#7dba6a";
   if (data?.side === "resistance") return "#d4654f";
   return "#d7a15f";
@@ -15,19 +18,25 @@ export function levelFigures({ coordinates, bounding, overlay }) {
   const data = overlay?.extendData || {};
   const color = levelColor(data);
   const name = data.label || (data.sources || [])[0] || "";
-  const text = `${Number(data.price).toFixed(2)} ${name}${data.touches ? ` · 测${data.touches}` : ""}`;
+  const price = Number(data.price);
+  const priceText = Number.isFinite(price) ? price.toFixed(2) : String(data.price ?? "");
+  const touches = data.touches ? ` · 测${data.touches}` : "";
+  // Focused guides read "进场 2500.00"; ordinary levels keep "2500.00 阻力".
+  const text = data.lead ? `${name} ${priceText}${touches}` : `${priceText} ${name}${touches}`;
   return [
     {
       type: "line",
       ignoreEvent: true,
       attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
-      styles: { color, size: 1, style: data.dynamic ? "dashed" : "solid" },
+      styles: { color, size: data.lead ? 1.5 : 1, style: data.dynamic ? "dashed" : "solid" },
     },
     {
       type: "text",
       ignoreEvent: true,
       attrs: { x: 8, y: y - 2, text, align: "left", baseline: "bottom" },
-      styles: { color, size: 11, backgroundColor: "transparent" },
+      styles: data.lead
+        ? { color: "#17190f", size: 11, backgroundColor: color }
+        : { color, size: 11, backgroundColor: "transparent" },
     },
   ];
 }
