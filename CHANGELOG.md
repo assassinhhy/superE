@@ -21,4 +21,4 @@
 
 ### Docs
 - 重构 `README.md` 为对外展示主页，脱敏文档中的本机绝对路径与内部笔记引用。
-- 新增 `CHANGELOG.md` 与 `docs/内核修复与工程优化记录.md`。
+- 新增 `CHANGELOG.md`、`LICENSE`（MIT）与 `docs/内核修复与工程优化记录.md`。
