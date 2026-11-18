@@ -334,7 +334,9 @@ async def _fill_gap_with_archive(rest, db, stamp, cfg, market, symbol, interval,
             await import_daily_klines(rest, db, stamp, cfg, market, symbol, interval, day)
         except Exception:
             log.warning("日度 K 线存档失败 %s %s %s", market, interval, day, exc_info=True)
-            return
+            # One missing archive day must not abandon the later days.
+            day += timedelta(days=1)
+            continue
         day += timedelta(days=1)
     # align_open is used by callers; reference it so the import stays meaningful for 3d/1w gaps.
     _ = align_open

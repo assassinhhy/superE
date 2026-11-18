@@ -1,41 +1,21 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal
 cd /d "%~dp0"
-echo closing desktop window
-call :killpid "%~dp0data\run\desktop.pid"
-echo closing board service
-call :killpid "%~dp0data\run\board.pid"
-echo closing news service
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"127.0.0.1:8769 .*LISTENING"') do taskkill /PID %%p /T /F >nul 2>&1
-echo asking API to shut down
-curl.exe -s -m 5 -X POST http://127.0.0.1:8766/api/shutdown >nul
-rem timeout.exe fails with "input redirection is not supported" when stdin
-rem is not a console, and the script used to kill the process immediately.
-set /a N=0
-:wait
-if not exist "%~dp0data\run\ingestor.pid" if not exist "%~dp0data\run\api.pid" goto clean
-if !N! GEQ 30 goto force
-ping 127.0.0.1 -n 2 >nul
-set /a N+=1
-goto wait
-:force
-echo graceful shutdown exceeded 30s, killing by pid
-call :killpid "%~dp0data\run\ingestor.pid"
-call :killpid "%~dp0data\run\api.pid"
-call :killpid "%~dp0data\run\desktop.pid"
-call :killpid "%~dp0data\run\board.pid"
-goto end
-:clean
-echo superE stopped
-goto end
-:end
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "NO_PROXY=127.0.0.1,localhost"
+set "no_proxy=127.0.0.1,localhost"
+if defined SUPERE_PYTHON (
+  set "PY=%SUPERE_PYTHON%"
+) else if exist "%~dp0.venv\Scripts\python.exe" (
+  set "PY=%~dp0.venv\Scripts\python.exe"
+) else (
+  set "PY=python"
+)
+echo stopping superE services
+"%PY%" -m supere stop
+if errorlevel 1 (
+  echo [WARN] some services did not stop - check data\run and data\logs
+  pause
+)
 endlocal
-exit /b 0
-
-:killpid
-if not exist "%~1" exit /b 0
-set /p PID=<"%~1"
-if "%PID%"=="" exit /b 0
-taskkill /PID %PID% /F >nul 2>&1
-del /f /q "%~1" >nul 2>&1
-exit /b 0

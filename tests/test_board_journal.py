@@ -166,6 +166,33 @@ def test_resolver_expired_t1_t2_and_restart(tmp_path: Path):
     restored.close()
 
 
+def test_fill_bar_cannot_also_hit_a_target():
+    # Entry 113, T1 90 and T2 80 all print inside the fill bar. Only the stop
+    # may resolve on that bar, so no win is booked from the same bar.
+    same_bar = [_minute(5, 114, 79, 80)]
+    out = assess_plan(_plan(), same_bar, GENERATED + 10 * 60_000, interval_ms=60_000)
+    assert out["filled"] == 1
+    assert out["t1_ms"] is None
+    assert out["t2_ms"] is None
+    assert out["first_hit"] is None
+    assert out["exit_reason"] is None
+    assert out["outcome"] == "open"
+
+    # The same bar touching the stop is still the conservative outcome.
+    stopped = [_minute(5, 121, 79, 80)]
+    out = assess_plan(_plan(), stopped, GENERATED + 10 * 60_000, interval_ms=60_000)
+    assert out["exit_reason"] == "stop"
+    assert out["first_hit"] == "stop"
+
+    # Targets are checked from the bar after the fill.
+    later = [_minute(5, 114, 79, 80), _minute(6, 112, 89, 89)]
+    out = assess_plan(_plan(), later, GENERATED + 10 * 60_000, interval_ms=60_000)
+    assert out["first_hit"] == "t1"
+    assert out["exit_reason"] == "t1"
+    assert out["t1_ms"] == later[1]["close_time"]
+    assert out["t2_ms"] is None
+
+
 def test_migration_keeps_rows_already_in_the_data_dir(tmp_path: Path):
     path = journal_path(tmp_path)
     path.parent.mkdir(parents=True)

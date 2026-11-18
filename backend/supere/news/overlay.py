@@ -153,7 +153,7 @@ def aggregate(items: list[dict], now_ms: int, horizon_ms: int) -> dict:
     sources: dict[str, int] = {}
     for row in usable:
         sources[str(row.get("source") or "unknown")] = sources.get(str(row.get("source") or "unknown"), 0) + 1
-    ranked = sorted(usable, key=lambda row: (-row["contribution"], -row["urgency"], -row["age_ms"]))
+    ranked = sorted(usable, key=lambda row: (-row["contribution"], -row["urgency"], row["age_ms"]))
     top = _top_news(ranked)
 
     agg = {

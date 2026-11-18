@@ -1,18 +1,41 @@
-# 方案、复核、计划，不进仓库
-方案.md
-方案*.md
-CC复核结果.md
-CC复核清单.md
-*复核*.md
-*计划书*
-*计划*.md
-DONE.md
+# 方案、复核、计划，不进仓库（仅根目录，子目录同名文档正常入库）
+/方案*.md
+/CC复核*.md
+/*复核*.md
+/*计划*.md
+/*计划书*
+/*调研*.md
+/*训练迭代记录*.md
+/*决策-*.md
+/交接给CC.md
+/report_v3.md
 **/DONE.md
 *.bak.md
 
 # 实测临时目录和日志
 _depthtest/
 cc_run.log
+
+# 根目录临时产物（脚本、日志、探测输出、临时 JSON）
+/_*.ps1
+/_*.ps1.*
+/_*.log
+/_*.py
+/_tmp/
+/_tmp*
+/_news_sample.json
+/cc_*
+/launch_cc_*
+/launch_oc_*
+/oc_*
+/r[0-9]*
+/final_*.log
+/*_pid.txt
+*.log
+/realtime_*.json
+/v6_independent_predict_*.json
+/CC_DO_NOT_CLOSE_USER_APP.txt
+/opencode_free.json
 
 # 数据、密钥、本机配置
 data/

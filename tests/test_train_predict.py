@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -292,6 +293,49 @@ def test_served_prediction_carries_levels_consistent_with_direction(tmp_path: Pa
         assert (lv["stop"] < lv["entry"] < lv["targets"][0]) == (out["direction"] == "up")
         risk = abs(lv["entry"] - lv["stop"])
         assert abs(abs(lv["targets"][0] - lv["entry"]) - risk) < 1e-6  # 1R on each side
+
+
+def test_quantile_model_update_is_reloaded_without_restart(tmp_path: Path, monkeypatch):
+    """A retrain must take effect on the next request; the service must not pin the old model."""
+    from supere.train import quantile, quantile_v3
+    from supere.train.predict import QuantilePredictService, _artifact_stamp
+
+    folder = tmp_path / "models_quantile" / INTERVAL
+    folder.mkdir(parents=True)
+    meta = folder / "meta.json"
+    meta.write_text("{}", encoding="utf-8")
+
+    loads = {"v2": 0, "v3": 0}
+
+    def fake_load_quantile(root, interval):
+        loads["v2"] += 1
+        return object()
+
+    def fake_load_v3(root, interval):
+        loads["v3"] += 1
+        return object()
+
+    monkeypatch.setattr(quantile, "load_quantile", fake_load_quantile)
+    monkeypatch.setattr(quantile_v3, "load_v3", fake_load_v3)
+
+    svc = QuantilePredictService(tmp_path)
+    first = svc._artifact(INTERVAL)
+    first_v3 = svc._v3_artifact(INTERVAL)
+    assert svc._artifact(INTERVAL) is first
+    assert svc._v3_artifact(INTERVAL) is first_v3
+    assert loads == {"v2": 1, "v3": 1}
+
+    # A retrain rewrites meta.json with a newer mtime.
+    stamp = meta.stat().st_mtime + 10.0
+    meta.write_text('{"retrained": true}', encoding="utf-8")
+    os.utime(meta, (stamp, stamp))
+
+    assert svc._artifact(INTERVAL) is not first
+    assert svc._v3_artifact(INTERVAL) is not first_v3
+    assert loads == {"v2": 2, "v3": 2}
+
+    # A folder that does not exist yet has an explicit 0.0 stamp.
+    assert _artifact_stamp(tmp_path / "models_quantile" / "1d") == 0.0
 
 
 def test_served_prediction_context_brackets_close_and_funding_is_before_decision(tmp_path: Path):

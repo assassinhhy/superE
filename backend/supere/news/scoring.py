@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 
 from supere import secrets
+from supere.netproxy import DEFAULT_PROXY, resolve_proxy
 from supere.news.summary import market_channel
 from supere.storage.db import Database
 
@@ -30,7 +31,9 @@ SCORER_VERSION = "ds-v2"
 PROMPT_VERSION = "p2"
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
-PROXY = "http://127.0.0.1:7890"
+# Kept for scripts that import ``PROXY`` as their argparse default. The actual
+# choice is made by :func:`supere.netproxy.resolve_proxy` at call time.
+PROXY = DEFAULT_PROXY
 
 SYSTEM_PROMPT = (
     "You are a crypto-news classifier. Return JSON only, no prose. "
@@ -246,9 +249,15 @@ def _parse_scores(payload: dict, ids: list[int]) -> dict[int, Score]:
     return out
 
 
-def score_batch_deepseek(items: list[dict], key: str, *, proxy: str = PROXY,
+def score_batch_deepseek(items: list[dict], key: str, *, proxy: str | None = None,
                          retries: int = 3, timeout: float = 45.0) -> dict[int, Score] | None:
-    """One request for a batch of ``{id,title,body}``. ``None`` means the call failed."""
+    """One request for a batch of ``{id,title,body}``. ``None`` means the call failed.
+
+    ``proxy`` is resolved here, once per batch: ``HTTPS_PROXY`` (either case)
+    wins, then the argument, then the local default. An empty string forces a
+    direct connection.
+    """
+    proxy = resolve_proxy(proxy)
     ids = [int(item["id"]) for item in items]
     user = json.dumps(
         [{"id": int(item["id"]), "title": (item.get("title") or "")[:400],
@@ -294,7 +303,7 @@ def _timing_quality(row: dict) -> str:
 
 
 def score_pending(db_path: Path, *, limit: int = 2000, batch_size: int = 10,
-                  use_deepseek: bool = True, proxy: str = PROXY,
+                  use_deepseek: bool = True, proxy: str | None = None,
                   rescore: bool = False) -> dict:
     """Score up to ``limit`` rows. Returns counts, never the key."""
     db = Database(Path(db_path))
@@ -383,7 +392,7 @@ def _score_from_row(row) -> Score:
 
 
 def score_items(db_path: Path, items: list[dict], *, use_deepseek: bool = True,
-                proxy: str = PROXY, timeout: float = 15.0,
+                proxy: str | None = None, timeout: float = 15.0,
                 batch_size: int = 8) -> dict:
     """Score freshly fetched rows before a click-time overlay.
 

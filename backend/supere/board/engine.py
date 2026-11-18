@@ -387,8 +387,6 @@ def analyze(snapshot: dict, analysis: AnalysisConfig) -> dict:
     side = "short" if direction == "空头" else "long" if direction == "多头" else None
     chase = _chase(side, levels, bars15)
     conclusion = _conclusion(trend, rng, chase, side)
-    if sentiment["status"] != "ok" and any(word in conclusion["text"] for word in ("爆仓", "堆仓", "新空", "新多", "回补")):
-        conclusion["text"] = conclusion["text"]
     risk = assess(
         int(snapshot.get("now_ms") or 0),
         snapshot.get("events") or [],

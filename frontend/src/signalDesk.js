@@ -61,11 +61,12 @@ export async function pollSignals(divergence = false) {
 }
 
 export function startSignalDesk(readDivergence) {
-  if (started) return;
+  if (started) return stopSignalDesk;
   started = true;
   const tick = () => pollSignals(Boolean(readDivergence?.()));
   tick();
   timer = setInterval(tick, 8000);
+  return stopSignalDesk;
 }
 
 export function stopSignalDesk() {

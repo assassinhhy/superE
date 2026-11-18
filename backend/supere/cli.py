@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,13 @@ def main(argv: list[str] | None = None) -> None:
     prev.add_argument("--days", type=int, default=10, help="合成 K 线的天数，从 2026-10-26 起")
     detach = sub.add_parser("detach", help="脱离调用方的管道后启动 ingestor 或 api，然后立刻退出")
     detach.add_argument("role", choices=("ingestor", "api", "board", "news"))
+    status_cmd = sub.add_parser("status", help="查看各服务的 PID 与端口监听状态")
+    status_cmd.add_argument("--role", choices=("ingestor", "api", "board", "news"),
+                            help="只看一个服务，默认全部")
+    status_cmd.add_argument("--json", action="store_true", help="输出机器可读的 JSON")
+    stop_cmd = sub.add_parser("stop", help="停止服务，默认全部")
+    stop_cmd.add_argument("--role", choices=("ingestor", "api", "board", "news"),
+                          help="只停一个服务，默认全部")
     news_cmd = sub.add_parser("news", help="消息面服务，127.0.0.1:8769，不加载预测模型")
     news_cmd.add_argument("--port", type=int, default=8769)
     news_cmd.add_argument("--data-dir", help="数据目录，默认用配置里的目录")
@@ -43,12 +51,26 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("restore-drill", help="把最近一份备份复制出来做完整性检查，不替换正在用的库")
 
     args = parser.parse_args(argv)
-    if args.cmd == "detach":
-        from supere.spawn import spawn_service
+    if args.cmd in {"detach", "status", "stop"}:
+        # These three must work even when config.toml is broken: the stop
+        # button is most useful exactly when the services misbehave.
+        from supere.spawn import service_status, spawn_service, stop_services
 
         root = Path(args.config).resolve().parent if args.config else Path.cwd()
-        pid = spawn_service(args.role, root=root)
-        print(pid)
+        data = _data_root(args.config, root)
+        if args.cmd == "detach":
+            print(spawn_service(args.role, root=root, data_root=data))
+            return
+        if args.cmd == "status":
+            roles = [args.role] if args.role else None
+            rows = service_status(data, roles=roles)
+            _print_status(rows, as_json=args.json)
+            return
+        roles = [args.role] if args.role else None
+        outcomes = stop_services(data, roles=roles)
+        failed = _report_stop(outcomes)
+        if failed:
+            raise SystemExit(1)
         return
     try:
         cfg, path = load_config(args.config)
@@ -109,6 +131,59 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_restore_drill(cfg, path))
     else:
         raise SystemExit(2)
+
+
+def _data_root(config: str | None, root: Path) -> Path:
+    """Resolve ``data.dir`` from config; fall back to ``<root>/data``.
+
+    ``status``/``stop`` must not fail just because ``config.toml`` is missing
+    or invalid, so every config error degrades to the default location.
+    """
+    from supere.config import data_dir
+
+    try:
+        cfg, path = load_config(config)
+    except Exception:
+        return Path(root) / "data"
+    return data_dir(cfg, path)
+
+
+def _print_status(rows, *, as_json: bool = False) -> None:
+    if as_json:
+        payload = [
+            {
+                "role": row.role,
+                "port": row.port,
+                "pid": row.pid,
+                "alive": row.alive,
+                "port_open": row.port_open,
+                "running": row.running,
+                "stale_pid": row.stale_pid,
+            }
+            for row in rows
+        ]
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+    for row in rows:
+        pid = str(row.pid) if row.pid is not None else "-"
+        alive = "是" if row.alive else "否"
+        listening = "是" if row.port_open else "否"
+        print(f"{row.role:<9} pid={pid:<8} 存活={alive:<2} 端口={row.port} 监听={listening}")
+
+
+def _report_stop(outcomes) -> bool:
+    """Print one line per service; return True when any stop failed."""
+    failed = False
+    for outcome in outcomes:
+        if outcome.status == "stopped":
+            print(f"已停止 {outcome.role} (pid {outcome.pid})")
+        elif outcome.status == "not-running":
+            print(f"未运行 {outcome.role}")
+        else:
+            failed = True
+            detail = f": {outcome.detail}" if outcome.detail else ""
+            print(f"停止失败 {outcome.role}{detail}", file=sys.stderr)
+    return failed
 
 
 def _backup(cfg, path) -> None:

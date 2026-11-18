@@ -76,7 +76,14 @@ class KlineManager:
         current = self.forming.get(key)
         if current is not None and event_ms < current.asof:
             return None
-        self.forming[key] = _Forming(bar=bar, kline_event_ms=event_ms, last_agg_id=0, asof=event_ms)
+        # Updating the same forming bar keeps the aggTrade watermark: zeroing it
+        # would re-apply trades already folded into this bar. Only a new bar starts
+        # from 0.
+        last_agg_id = 0
+        if current is not None and current.bar.open_time == bar.open_time:
+            last_agg_id = current.last_agg_id
+        self.forming[key] = _Forming(bar=bar, kline_event_ms=event_ms,
+                                     last_agg_id=last_agg_id, asof=event_ms)
         return None
 
     async def on_agg_trade(self, market: str, parsed: dict) -> None:
@@ -92,7 +99,7 @@ class KlineManager:
             bar = forming.bar
             if trade_ts < bar.open_time or trade_ts > bar.close_time:
                 continue
-            if trade_ts <= forming.kline_event_ms or agg_id <= forming.last_agg_id:
+            if trade_ts < forming.kline_event_ms or agg_id <= forming.last_agg_id:
                 continue
             quote = price * qty
             taker = not parsed.get("is_buyer_maker")

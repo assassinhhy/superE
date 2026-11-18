@@ -21,8 +21,9 @@ from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from supere.netproxy import DEFAULT_PROXY, resolve_proxy
 from supere.news.dedup import same_text, simhash64, url_hash
-from supere.news.scoring import PROXY, content_hash
+from supere.news.scoring import content_hash
 from supere.storage.db import Database
 
 BINANCE_URL = (
@@ -44,7 +45,7 @@ RSS_SOURCES = (
     ("theblock", "https://www.theblock.co/rss.xml"),
     ("google_news_eth", GOOGLE_NEWS_URL),
 )
-PROXY_DEFAULT = PROXY
+PROXY_DEFAULT = DEFAULT_PROXY
 MAX_AGE_MS = 24 * 3_600_000
 MAX_ITEMS = 60
 GOOGLE_MAX_ITEMS = 12

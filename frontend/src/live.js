@@ -21,6 +21,7 @@ export const state = reactive({
 
 let socket = null;
 let started = false;
+let timers = [];
 
 function applyFrame(frame) {
   state.depth = frame.depth || null;
@@ -76,12 +77,34 @@ async function refresh() {
 }
 
 export function startLive() {
-  if (started) return;
+  if (started) return stopLive;
   started = true;
   connect();
   refresh();
-  setInterval(refresh, 5000);
-  setInterval(() => {
-    if (!socket || socket.readyState === WebSocket.CLOSED) connect();
-  }, 2000);
+  timers = [
+    setInterval(refresh, 5000),
+    setInterval(() => {
+      if (!socket || socket.readyState === WebSocket.CLOSED) connect();
+    }, 2000),
+  ];
+  return stopLive;
+}
+
+export function stopLive() {
+  started = false;
+  for (const id of timers) clearInterval(id);
+  timers = [];
+  if (socket) {
+    socket.onopen = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.onmessage = null;
+    try {
+      socket.close();
+    } catch {
+      /* already closed */
+    }
+    socket = null;
+  }
+  state.ws = false;
 }

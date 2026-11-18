@@ -222,9 +222,11 @@ export function applyBoardPoll(state, previous, outcome, now) {
 
 let timer = null;
 let last = null;
+let generation = 0;
 
 export function startBoardDesk(state, { fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
-  if (timer) return;
+  if (timer) return stopBoardDesk;
+  const gen = ++generation;
   async function tick() {
     const moment = now();
     let outcome;
@@ -235,6 +237,7 @@ export function startBoardDesk(state, { fetchImpl = globalThis.fetch, now = () =
     } catch {
       outcome = { ok: false, error: "盘面服务未启动" };
     }
+    if (gen !== generation) return;
     const applied = applyBoardPoll(
       { view: state.view, fetchedAt: state.fetchedAt, since: state.since },
       last,
@@ -251,9 +254,11 @@ export function startBoardDesk(state, { fetchImpl = globalThis.fetch, now = () =
   }
   tick();
   timer = setInterval(tick, BOARD_POLL_MS);
+  return stopBoardDesk;
 }
 
 export function stopBoardDesk() {
+  generation += 1;
   if (timer) clearInterval(timer);
   timer = null;
   last = null;

@@ -38,6 +38,28 @@ AUX_TTL_SECONDS = 60.0  # funding and metrics re-read at most this often
 DEFAULT_BAR_LIMIT = 1500  # newest bars loaded per call; EMA warm-up needs ~300
 
 
+def _artifact_stamp(directory: Path) -> float:
+    """Newest mtime in a model folder; 0.0 when the folder does not exist yet.
+
+    Training replaces files in place, so the folder's own mtime does not change
+    reliably. Every entry is checked instead; ``*.tmp`` files are mid-save and
+    ignored so a save never races this stat(). Any change reloads the model.
+    """
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0.0
+    stamp = 0.0
+    for path in entries:
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            stamp = max(stamp, path.stat().st_mtime)
+        except OSError:
+            continue
+    return stamp
+
+
 EXPLAIN_TOP = 3  # features shown per prediction
 CLASS_ORDER = ("down", "flat", "up")  # booster column order: classes 0, 1, 2
 
@@ -381,17 +403,25 @@ class QuantilePredictService:
 
     def _artifact(self, interval):
         import supere.train.quantile as q
-        if interval in self._cache:
-            return self._cache[interval]
+        directory = self.data_root / "models_quantile" / interval
+        stamp = _artifact_stamp(directory)
+        cached = self._cache.get(interval)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
         art = q.load_quantile(self.data_root, interval)
-        self._cache[interval] = art
+        self._cache[interval] = (stamp, art)
         return art
 
     def _v3_artifact(self, interval):
         import supere.train.quantile_v3 as v3
-        if interval not in self._v3_cache:
-            self._v3_cache[interval] = v3.load_v3(self.data_root, interval)
-        return self._v3_cache[interval]
+        directory = self.data_root / v3.ARTIFACT_ROOT_NAME / interval
+        stamp = _artifact_stamp(directory)
+        cached = self._v3_cache.get(interval)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        art = v3.load_v3(self.data_root, interval)
+        self._v3_cache[interval] = (stamp, art)
+        return art
 
     def predict(self, interval):
         import math
@@ -431,33 +461,40 @@ class QuantilePredictService:
         cfg = art.meta["config"]
         groups = q.feature_groups(q.default_config(interval, cfg))
         now_ms = int(self._clock() * 1000)
+        htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(interval)
+        # Higher-timeframe features only read the newest closed bar and a 20-bar
+        # window, so the same bounded window as the main series is plenty.
+        higher_limit = max(self.bar_limit, 1500)
         try:
             conn = data.open_readonly(self.db_path)
             try:
-                bars = data.load_bars(conn, cfg["market"], cfg["symbol"], interval, self.bar_limit)
+                # Every series is cut at ``now`` *before* the row limit is applied.
+                # The table can contain bars the collector has already closed but
+                # that are later than the caller's clock (backfill, replay, a frozen
+                # test clock). Loading newest-first without this filter would let
+                # those future bars push the whole historical window out.
+                def load(market: str, symbol: str, frame: str, limit: int | None) -> data.Bars:
+                    return data.load_bars(conn, market, symbol, frame, limit, close_by_ms=now_ms)
+
+                bars = load(cfg["market"], cfg["symbol"], interval, self.bar_limit)
                 funding = data.load_funding(conn, cfg["symbol"])
                 metrics_in = data.load_metrics(conn, cfg["symbol"])
-                mark = data.load_bars(conn, "um_mark", cfg["symbol"], interval, self.bar_limit)
-                index = data.load_bars(conn, "um_index", cfg["symbol"], interval, self.bar_limit)
-                premium = data.load_bars(conn, "um_premium", cfg["symbol"], interval, self.bar_limit)
+                mark = load("um_mark", cfg["symbol"], interval, self.bar_limit)
+                index = load("um_index", cfg["symbol"], interval, self.bar_limit)
+                premium = load("um_premium", cfg["symbol"], interval, self.bar_limit)
                 btc_bars = None
                 if "btc" in groups:
-                    btc_bars = data.load_bars(conn, cfg["market"], cfg.get("btc_symbol", "BTCUSDT"),
-                                              interval, self.bar_limit)
+                    btc_bars = load(cfg["market"], cfg.get("btc_symbol", "BTCUSDT"),
+                                    interval, self.bar_limit)
+                higher = None
+                if htf_interval:
+                    higher = load("um", cfg["symbol"], htf_interval, higher_limit)
             finally:
                 conn.close()
             if btc_bars is not None:
                 # Only BTC bars already closed at ``now``; alignment is by open time.
                 n_btc = int(np.searchsorted(btc_bars.close_time, now_ms, side="right"))
                 btc_bars = btc_bars.slice_to(n_btc)
-            htf_interval = {"5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d"}.get(interval)
-            higher = None
-            if htf_interval:
-                conn = data.open_readonly(self.db_path)
-                try:
-                    higher = data.load_bars(conn, "um", cfg["symbol"], htf_interval, None)
-                finally:
-                    conn.close()
             alt = altdata.load_alt(self.data_root, groups, btc=btc_bars)
             n_closed = int(np.searchsorted(bars.close_time, now_ms, side="right"))
             if n_closed == 0:

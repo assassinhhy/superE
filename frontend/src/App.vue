@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import BoardPanel from "./components/BoardPanel.vue";
 import ChartPane from "./components/ChartPane.vue";
+import ClockText from "./components/ClockText.vue";
 import NewsView from "./components/NewsView.vue";
 import SettingsDrawer from "./components/SettingsDrawer.vue";
 import SidePanel from "./components/SidePanel.vue";
@@ -9,7 +10,7 @@ import StatusBar from "./components/StatusBar.vue";
 import Toasts from "./components/Toasts.vue";
 import TrainView from "./components/TrainView.vue";
 import { startBoardDesk } from "./board.js";
-import { INTERVALS, formatUtc8, isBackfilling } from "./indicators.js";
+import { INTERVALS, isBackfilling } from "./indicators.js";
 import { startLive, state } from "./live.js";
 import { bootNotify } from "./notify.js";
 import { startSignalDesk } from "./signalDesk.js";
@@ -19,7 +20,7 @@ const side = ref("board");
 const market = ref("um");
 const interval = ref("15m");
 const settings = ref(false);
-const clock = ref(formatUtc8(Date.now()));
+const nowTick = ref(Date.now());
 const divergence = ref(false);
 const focusPlan = ref("");
 const board = reactive({ view: null, offline: false, error: "", fetchedAt: null, since: null });
@@ -30,7 +31,7 @@ try {
   divergence.value = false;
 }
 
-const filling = computed(() => isBackfilling(state.events, Date.now()));
+const filling = computed(() => isBackfilling(state.events, nowTick.value));
 
 function setSpot() {
   market.value = "spot";
@@ -50,14 +51,25 @@ watch(market, (value) => {
   if (value === "spot") interval.value = "1m";
 });
 
+const stops = [];
+let nowTimer = 0;
+
 onMounted(() => {
   bootNotify();
-  startLive();
-  startSignalDesk(() => divergence.value);
-  startBoardDesk(board);
-  setInterval(() => {
-    clock.value = formatUtc8(Date.now());
-  }, 1000);
+  stops.push(startLive(), startSignalDesk(() => divergence.value), startBoardDesk(board));
+  nowTick.value = Date.now();
+  nowTimer = setInterval(() => {
+    nowTick.value = Date.now();
+  }, 5000);
+});
+
+onUnmounted(() => {
+  if (nowTimer) clearInterval(nowTimer);
+  nowTimer = 0;
+  for (const stop of stops) {
+    if (typeof stop === "function") stop();
+  }
+  stops.length = 0;
 });
 </script>
 
@@ -81,7 +93,7 @@ onMounted(() => {
           {{ item.id }}
         </button>
       </div>
-      <div class="clock">{{ clock }} · UTC+8</div>
+      <div class="clock"><ClockText /> · UTC+8</div>
       <nav>
         <button type="button" :class="{ on: tab === 'market' }" @click="tab = 'market'">行情</button>
         <button type="button" :class="{ on: tab === 'news' }" @click="tab = 'news'">消息</button>
@@ -100,7 +112,7 @@ onMounted(() => {
         <div class="side-tabs">
           <button type="button" :class="{ on: side === 'board' }" @click="side = 'board'">盘面</button>
           <button type="button" :class="{ on: side === 'signal' }" @click="side = 'signal'">信号</button>
-          <span class="side-clock">{{ clock.slice(11, 19) }} UTC+8</span>
+          <span class="side-clock"><ClockText short /> UTC+8</span>
         </div>
         <BoardPanel
           v-show="side === 'board'"
@@ -119,8 +131,10 @@ onMounted(() => {
         />
       </aside>
     </main>
-    <NewsView v-else-if="tab === 'news'" />
-    <TrainView v-else />
+    <KeepAlive>
+      <NewsView v-if="tab === 'news'" />
+      <TrainView v-else-if="tab === 'train'" />
+    </KeepAlive>
     <Toasts />
     <StatusBar />
     <SettingsDrawer v-if="settings" @close="settings = false" />

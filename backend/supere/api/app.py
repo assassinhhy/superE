@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -316,20 +317,32 @@ def create_app(
     @app.websocket("/ws/live")
     async def live(websocket: WebSocket):
         await websocket.accept()
+        last_sig: str | None = None
+        last_sent = 0.0
+        heartbeat = 2.5
         try:
             while True:
-                await websocket.send_json(
-                    {
-                        "forming": hub.forming,
-                        "closed": list(hub.closed),
-                        "depth": hub.depth,
-                        "ticker": hub.ticker,
-                        "mark": hub.mark,
-                        "trades": list(hub.trades)[:40],
-                        "liquidations": list(hub.liquidations)[:30],
-                        "status": hub.status,
-                    }
-                )
+                payload = {
+                    "forming": hub.forming,
+                    "closed": list(hub.closed),
+                    "depth": hub.depth,
+                    "ticker": hub.ticker,
+                    "mark": hub.mark,
+                    "trades": list(hub.trades)[:40],
+                    "liquidations": list(hub.liquidations)[:30],
+                    "status": hub.status,
+                }
+                try:
+                    sig = json.dumps(
+                        payload, sort_keys=True, separators=(",", ":"), default=str
+                    )
+                except TypeError:
+                    sig = None
+                now = asyncio.get_running_loop().time()
+                if sig is None or sig != last_sig or now - last_sent >= heartbeat:
+                    await websocket.send_json(payload)
+                    last_sig = sig
+                    last_sent = now
                 await asyncio.sleep(0.25)
         except WebSocketDisconnect:
             return

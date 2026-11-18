@@ -120,6 +120,19 @@ def test_top_news_are_ranked_and_limited_to_three():
     assert agg["top_news"][0]["urgency"] >= agg["top_news"][1]["urgency"]
 
 
+def test_top_news_breaks_a_tie_toward_the_newer_story():
+    # contribution = decay * relevance (urgency=1, |direction|=1), so
+    # 0.5 * 0.8 == 1.0 * 0.4. With equal urgency the newer row must win,
+    # which means age is sorted ascending, not negated.
+    older = item(id=1, title="older", urgency=1.0, relevance=0.8, direction=1.0,
+                 ts_published=NOW - 3_600_000, available_at=NOW - 3_600_000)
+    newer = item(id=2, title="newer", urgency=1.0, relevance=0.4, direction=1.0,
+                 ts_published=NOW, available_at=NOW)
+    agg = overlay.aggregate([older, newer], NOW, 3_600_000)
+    assert agg["top_news"][0]["title"] == "newer"
+    assert agg["top_news"][1]["title"] == "older"
+
+
 def test_alert_empty_and_high_are_plain_chinese():
     empty = overlay.aggregate([], NOW, 3_600_000)["alert"]
     assert empty["title"] == "暂无显著异常"

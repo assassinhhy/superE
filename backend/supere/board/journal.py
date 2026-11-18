@@ -275,8 +275,11 @@ def assess_plan(plan: dict, bars: list[dict], now_ms: int, *, interval_ms: int) 
     """Outcome for one stored plan. ``None`` means the klines do not say yet.
 
     A fill is a later bar whose high-low touches the fixed entry before expiry.
-    The same bar hitting the stop and a target counts as the stop. Final R is
-    the backtest's half-at-T1 path, minus taker 0.05%×2 and maker 0.02%×2.
+    The same bar hitting the stop and a target counts as the stop. The fill bar
+    itself may only resolve the stop: a target touched by that same bar could
+    have printed before the fill, so T1/T2 are checked from the next bar on.
+    Final R is the backtest's half-at-T1 path, minus taker 0.05%×2 and maker
+    0.02%×2.
     """
     entry = plan.get("entry")
     stop = plan.get("stop")
@@ -358,6 +361,12 @@ def assess_plan(plan: dict, bars: list[dict], now_ms: int, *, interval_ms: int) 
             hit_t1 = t1 is not None and high >= t1
             hit_t2 = t2 is not None and high >= t2
         stamp = int(bar["close_time"])
+        if int(bar["open_time"]) == int(fill["open_time"]):
+            # Entry is only known to have traded somewhere inside this bar.
+            # A target touched by the fill bar may have printed before the
+            # fill, so only the stop is allowed to resolve here.
+            hit_t1 = False
+            hit_t2 = False
         if not half:
             if hit_stop:
                 stop_ms = stamp
@@ -371,12 +380,6 @@ def assess_plan(plan: dict, bars: list[dict], now_ms: int, *, interval_ms: int) 
                 exit_reason = "t1"
                 gross = 0.5 * _leg(side, entry, t1)
                 if t2 is None:
-                    finished = True
-                    break
-                if hit_stop:
-                    stop_ms = stamp
-                    exit_reason = "t1_stop"
-                    gross += 0.5 * _leg(side, entry, stop)
                     finished = True
                     break
                 if hit_t2:

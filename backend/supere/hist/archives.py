@@ -1,6 +1,8 @@
 """Download data.binance.vision archives with resume and SHA-256 checks.
 
-Everything goes through an explicit proxy.  A partial file is kept as
+The proxy is resolved by :func:`supere.netproxy.resolve_proxy`, so
+``HTTPS_PROXY`` / ``HTTP_PROXY`` wins over the value passed by the caller and
+an explicit empty string means "connect directly".  A partial file is kept as
 ``<name>.part`` and resumed with an HTTP Range request.  A finished file is
 renamed to ``<name>`` and a ``<name>.sha256`` sidecar is written, so a restart
 can verify it without touching the network.
@@ -20,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from supere.binance.archive import parse_checksum
+from supere.netproxy import resolve_proxy
 
 VISION_DEFAULT = "https://data.binance.vision/data"
 S3_LIST = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
@@ -121,10 +124,13 @@ def default_opener(proxy: str | None) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
+_PROXY_UNSET = object()
+
+
 class VisionClient:
     def __init__(
         self,
-        proxy: str | None = "http://127.0.0.1:7890",
+        proxy: str | None | object = _PROXY_UNSET,
         *,
         timeout: float = 60.0,
         retries: int = 5,
@@ -132,11 +138,20 @@ class VisionClient:
         opener=None,
         sleep=time.sleep,
     ) -> None:
-        self.proxy = proxy
+        # Omitting ``proxy`` keeps the historical default while letting the
+        # environment override it.  ``None`` still means "direct" because
+        # callers (and the tests) use it for loopback servers.
+        if proxy is _PROXY_UNSET:
+            resolved = resolve_proxy()
+        elif proxy is None:
+            resolved = None
+        else:
+            resolved = resolve_proxy(proxy)  # type: ignore[arg-type]
+        self.proxy = resolved
         self.timeout = timeout
         self.retries = retries
         self.backoff = backoff
-        self._opener = opener or default_opener(proxy)
+        self._opener = opener or default_opener(resolved)
         self._sleep = sleep
 
     # -- low level ---------------------------------------------------------
